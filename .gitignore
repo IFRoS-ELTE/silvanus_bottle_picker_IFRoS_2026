@@ -3,3 +3,7 @@ install/
 log/
 __pycache__/
 *.pyc
+*.pt
+runs/
+*.pt
+runs/

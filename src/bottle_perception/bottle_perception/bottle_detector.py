@@ -50,7 +50,7 @@ class BottleDetector(Node):
         # La primera vez descarga los pesos (~5 MB) a la carpeta desde la que lanzas.
         self.get_logger().info(f'cargando YOLO: {model_path} ...')
         self.model = YOLO(model_path)
-        # model.names es un diccionario {id: nombre}, p. ej. {39: 'bottle', ...}
+        # model.names diccionary {id: nombre}, p. ej. {39: 'bottle', ...}
         self.class_ids = [i for i, name in self.model.names.items() if name in wanted]
         if not self.class_ids:
             self.get_logger().error(

@@ -20,6 +20,7 @@ setup(
     entry_points={
         'console_scripts': [
             'bottle_detector = bottle_perception.bottle_detector:main',
+            'bottle_localizer = bottle_perception.bottle_localizer:main',
         ],
     },
 )

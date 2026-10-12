@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>bottle_perception</name>
+  <version>0.0.1</version>
+  <description>Percepcion de botellas para Silvanus: deteccion con YOLO sobre la camara de la muneca.</description>
+  <maintainer email="jemima.n.t@gmail.com">Jemima</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>vision_msgs</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>visualization_msgs</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>tf2_geometry_msgs</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <!-- ultralytics (YOLO) NO in rosdep: install with pip en el entorno virtual.
+       Ver README / requirements.txt at the repo. -
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

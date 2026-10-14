@@ -31,3 +31,124 @@ In parallel with optimizing the detection posture, we are actively working on in
 
 ![Optimal Robot Position for Detection](images/bottle_detector_pos.png)
 *Caption: The selected robotic posture optimized for bottle detection within the simulation.*
+
+# bottle_perception: bottle detection and 3D localization
+
+Detects bottles in the Silvanus wrist camera (D435) with YOLO and computes their 3D position in the `odom` frame.
+
+```
+/camera/color/image_raw ──► bottle_detector (YOLO) ──/bottles/detections──► bottle_localizer ──► /bottles/positions
+                                    └──► /bottles/image_annotated              ▲   ▲          └─► /bottles/markers
+                      /camera/depth/image_raw + /camera/color/camera_info ─────┘   └── TF
+```
+
+| Node | What it does |
+|---|---|
+| `bottle_detector` | YOLO11n (COCO-pretrained, class `bottle`) on every color image. Outputs 2D boxes in **pixels**. |
+| `bottle_localizer` | For each box: median depth of the box centre (+ bottle radius) → pinhole back-projection → TF to `odom`. Outputs positions in **meters**. No memory: each message only contains what is visible now. |
+
+## Topics
+
+| Topic | Type | Published by |
+|---|---|---|
+| `/bottles/detections` | `vision_msgs/Detection2DArray` | detector: boxes (px) + confidence |
+| `/bottles/image_annotated` | `sensor_msgs/Image` | detector: image with boxes (debug) |
+| `/bottles/positions` | `geometry_msgs/PoseArray` | localizer: bottle positions in `odom` ← **use this** |
+| `/bottles/markers` | `visualization_msgs/MarkerArray` | localizer: cylinders for RViz |
+
+Inputs: `/camera/color/image_raw`, `/camera/color/camera_info`, `/camera/depth/image_raw`, `/tf`.
+
+---
+
+## 1. One-time setup
+
+**Requires:** Ubuntu 24.04, ROS 2 Jazzy, and `~/workspaces/scout_xarm_ros2` built (the simulator).
+
+```bash
+# ROS dependencies
+sudo apt install python3-venv ros-jazzy-vision-msgs ros-jazzy-cv-bridge \
+                 ros-jazzy-tf2-ros ros-jazzy-tf2-geometry-msgs
+
+# Python venv for YOLO (ultralytics is not in rosdep).
+# --system-site-packages: the venv can still see ROS (rclpy, cv_bridge, colcon).
+python3 -m venv --system-site-packages ~/venvs/yolo
+source ~/venvs/yolo/bin/activate
+pip install -r requirements.txt     # numpy<2, setuptools<80, ultralytics
+```
+
+Check that the GPU is visible (should print `True`):
+```bash
+python3 -c "import torch; print(torch.cuda.is_available())"
+```
+
+The YOLO weights (`yolo11n.pt`, ~5 MB) download automatically on first run. This needs internet.
+
+## 2. Build
+
+> ⚠️ Build with **`python3 -m colcon`** and the venv **active**. Plain `colcon build` writes `#!/usr/bin/python3` into the node launchers, and then the detector fails with `No module named 'ultralytics'`.
+
+```bash
+cd ~/workspaces/silvanus_bottle_picker
+source ~/venvs/yolo/bin/activate
+source /opt/ros/jazzy/setup.bash
+source ~/workspaces/scout_xarm_ros2/install/setup.bash
+python3 -m colcon build --symlink-install
+source install/setup.bash
+```
+Check:
+```bash
+colcon list | grep bottle          # must say (ros.ament_python), not (python)
+head -1 install/bottle_perception/lib/bottle_perception/bottle_detector   # must point to ~/venvs/yolo
+```
+
+## 3. Run in simulation
+
+Use `ROS_DOMAIN_ID=0` in **every** terminal. The real robot uses 42.
+
+**Every ROS terminal** needs these, in this order (our workspace always last):
+```bash
+source ~/venvs/yolo/bin/activate
+source /opt/ros/jazzy/setup.bash
+source ~/workspaces/scout_xarm_ros2/install/setup.bash
+source ~/workspaces/silvanus_bottle_picker/install/setup.bash
+export ROS_DOMAIN_ID=0
+```
+
+| Terminal | Command |
+|---|---|
+| 1. Gazebo | `ros2 launch scout_xarm_gazebo sim.launch.py world:=weston_robot_empty.world` |
+| 2. Bottles + arm | `./sim/spawn_bottles.sh` then `./sim/search_pose.sh` (far view) or `./sim/observation_pose.sh` (close view) |
+| 3. Detector | `ros2 launch bottle_perception detector.launch.py confidence:=0.2` |
+| 4. Localizer | `ros2 run bottle_perception bottle_localizer --ros-args -p use_sim_time:=true` |
+| 5. View | `rviz2 --ros-args -p use_sim_time:=true` (Fixed Frame `odom`, add MarkerArray `/bottles/markers` and Image `/bottles/image_annotated`) |
+
+Start terminal 1 and wait until the arm has reached its home pose before running terminal 2.
+
+## 4. Check that it works
+
+- The detector prints `X FPS | botellas: N [scores]` every 2 s. **No FPS line at all = no images arriving** (see troubleshooting).
+- The localizer prints `bottle i: x=… y=… z=… m in "odom"`. Compare with the true positions from `spawn_bottles.sh` (the robot starts at the origin):
+
+| Bottle | True (x, y) |
+|---|---|
+| `bottle_front` | (1.0, 0.0) |
+| `bottle_left` | (1.5, 0.6) |
+| `bottle_lying` | (1.3, −0.5) |
+
+Measured error so far: ≤ 2 cm. `z` ≈ 0.10–0.15 m (height of the box centre).
+
+> The Gazebo bottles are simple cylinders, so YOLO confidence is low (~0.2–0.4) and sometimes only one is detected. This is expected; real bottles detect much better.
+
+## 5. Parameters
+
+**bottle_detector** (`ros2 launch ... name:=value`): `confidence` (0.25), `model` (`yolo11n.pt`), `image_topic` (`/camera/color/image_raw`), `use_sim_time` (true).
+
+**bottle_localizer** (`--ros-args -p name:=value`): `target_frame` (`odom`), `depth_topic` (`/camera/depth/image_raw`), `camera_info_topic` (`/camera/color/camera_info`), `roi_fraction` (0.3), `max_depth` (4.0 m), `bottle_radius` (0.035 m).
+
+## 6. Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `Package 'bottle_perception' not found` after a clean build | `package.xml` is malformed, so colcon builds it as plain `(python)`. Check with `colcon list`, then fix the XML. Or you didn't `source install/setup.bash` in this terminal. |
+| `ModuleNotFoundError: ultralytics` | Venv not active, or built with plain `colcon`. Rebuild with `python3 -m colcon build --symlink-install`. |
+| Detector stuck on `esperando imagenes...` | No images: Gazebo not running/paused, or a different `ROS_DOMAIN_ID`. Test with `ros2 topic hz /camera/color/image_raw`. |

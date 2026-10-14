@@ -23,7 +23,7 @@ This section documents the iterative development of the vision and approach modu
 ![First bottle detection test](images/bottle_test_2.jpg)
 *Caption: Additional testing to verify model accuracy on random images.*
 
-### Update: [Current Date] - Detection Positioning & 3D Spatial Integration
+### Update: [07/10/2026] - Detection Positioning & 3D Spatial Integration
 
 We have established and integrated a dedicated configuration file that commands the robotic arm to automatically navigate to a predefined "detection position." After conducting multiple preliminary tests in the simulation, we deliberately selected this specific posture because it currently provides the camera with an optimal, unobstructed field of view of the workspace. This angle significantly enhances the reliability of the bottle recognition algorithm. While this static position serves as our current baseline for approaching the target, it provides a highly stable foundation for our vision system.
 

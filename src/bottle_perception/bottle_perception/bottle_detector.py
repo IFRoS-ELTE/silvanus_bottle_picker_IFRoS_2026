@@ -17,9 +17,11 @@ Parameters (change with --ros-args -p name:=value):
     device        '' = automatic (GPU if available), 'cpu', or '0' for the first GPU.
 """
 
+import signal
 import time
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy
 from sensor_msgs.msg import Image
@@ -127,9 +129,11 @@ def main(args=None) -> None:
     node = BottleDetector()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
+        # Ctrl+C under ros2 launch delivers SIGINT twice (terminal + launch); don't let the
+        # second one interrupt the cleanup
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        rclpy.try_shutdown()

@@ -199,10 +199,10 @@ python3 -m venv --system-site-packages ~/silvanus_venv
 source ~/silvanus_venv/bin/activate
 pip install -r requirements.txt
 
-colcon build --symlink-install --packages-select bottle_perception grasp_pipeline
+colcon build --packages-select bottle_perception grasp_pipeline
 ```
 
-The node entry points start with `#!/usr/bin/env python3`, so activate the venv in any terminal that runs `bottle_detector`. Otherwise it can't import `ultralytics`.
+`bottle_perception/setup.cfg` makes the entry points start with `#!/usr/bin/env python3`, so they run with whatever Python is active. Activate the venv in any terminal that runs `bottle_detector`, otherwise it can't import `ultralytics`. Don't build with `--symlink-install`: that ignores the `setup.cfg` setting and hard-codes `/usr/bin/python3`.
 
 The YOLO weights (`yolo11n.pt`) are downloaded automatically on first run.
 
@@ -297,6 +297,7 @@ Run the detector with `use_sim_time:=false` and the matching `image_topic`.
 | `point cloud is unorganized` | The camera publishes a flat cloud (`height == 1`). The 2D box crop needs an organized cloud. |
 | `Not enough valid depth points in bounding box` | The bottle is too far away, too small, or outside the depth range. Move the arm or the bottle closer. |
 | CUDA out-of-memory on the server | Close other GPU users. `forward_passes` is already 1. |
+| `ModuleNotFoundError: No module named 'ultralytics'` | Either the venv isn't active, or the package was built with `--symlink-install` (check `head -1 install/bottle_perception/lib/bottle_perception/bottle_detector`). Remove `build/bottle_perception` and `install/bottle_perception`, then rebuild without that flag. |
 | `ImportError` / NumPy errors from `cv_bridge` | NumPy 2 is installed in the venv. Reinstall with `pip install "numpy<2"`. |
 
 ### TODO

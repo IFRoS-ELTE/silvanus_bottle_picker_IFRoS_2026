@@ -337,11 +337,13 @@ print(len(s.recv()) // (17 * 4))
 
 ### Real robot: detection and localization (not yet tested end-to-end)
 
-The robot's bringup (`silvanus-up.sh`, ROS domain **42**) starts the D435 with the driver's defaults:
-- color on `/camera/color/image_raw`;
-- depth on `/camera/depth/image_rect_raw`, **not aligned** to color.
+The robot's bringup (`silvanus-up.sh`, ROS domain **42**) publishes the D435 under **`/camera/camera/`**:
+- color: `/camera/camera/color/image_raw`, `/camera/camera/color/camera_info`;
+- depth aligned to color: `/camera/camera/aligned_depth_to_color/image_raw` and its `camera_info`;
+- raw depth: `/camera/camera/depth/image_rect_raw`;
+- no point cloud.
 
-`bottle_localizer` handles unaligned depth itself, using the depth camera's own `camera_info` and the depth→color TF, so the robot's camera launch doesn't need changing.
+The nodes' defaults are the sim's topic names, so on the robot they need the topic parameters below. (`bottle_localizer` would also cope with the raw, unaligned depth, using its `camera_info` and the depth→color TF.)
 
 **Quick start:** `ROBOT=1 ./sim/grasp_demo.sh` (the `robot-demo` alias) opens the same kind of tabs as the sim demo, but for the robot: `detector`, `localizer`, `grasp` and `image` (YOLO boxes).
 - **Environment:** every tab gets the same environment as the sim demo, plus `ROS_DOMAIN_ID=42`, `ROS_STATIC_PEERS=192.168.1.102` (`ROBOT_IP`), `ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET`, and `ROS_LOCALHOST_ONLY` unset.
@@ -351,15 +353,20 @@ The robot's bringup (`silvanus-up.sh`, ROS domain **42**) starts the D435 with t
 By hand, in every terminal after the usual sourcing:
 
 ```bash
-export ROS_DOMAIN_ID=42
-ros2 launch bottle_perception detector.launch.py use_sim_time:=false
-ros2 run bottle_perception bottle_localizer --ros-args -p depth_topic:=/camera/depth/image_rect_raw
+export ROS_DOMAIN_ID=42 ROS_STATIC_PEERS=192.168.1.102 ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET
+unset ROS_LOCALHOST_ONLY
+ros2 launch bottle_perception detector.launch.py use_sim_time:=false image_topic:=/camera/camera/color/image_raw
+ros2 run bottle_perception bottle_localizer --ros-args \
+  -p depth_topic:=/camera/camera/aligned_depth_to_color/image_raw \
+  -p depth_info_topic:=/camera/camera/aligned_depth_to_color/camera_info \
+  -p camera_info_topic:=/camera/camera/color/camera_info -p target_frame:=base_footprint
+ros2 run rqt_image_view rqt_image_view /bottles/image_annotated
 ```
 
 - **Frame:** the localizer publishes in `odom`, which only exists while the base driver runs. With `--no-base`, add `-p target_frame:=base_footprint`.
 - **Python:** both nodes pick the right Python themselves, even with conda's `(base)` active. `bottle_localizer` restarts under the system Python. `bottle_detector` restarts under the venv at `~/silvanus_venv` (or `$SILVANUS_VENV`).
 - **YOLO weights:** the robot has no internet, so they must already be downloaded (they are after one run on your laptop). Run the nodes on your laptop, connected to the robot's network.
-- **`grasp_inference` with Contact-GraspNet:** needs an organized point cloud, which the robot doesn't publish by default. That needs `pointcloud.enable:=true pointcloud.ordered_pc:=true` on the driver, plus `-p cloud_axes:=optical` and remapping `/camera/depth/points` to the driver's cloud topic.
+- **`grasp_inference`** (the `grasp` tab): needs an organized point cloud, which the robot doesn't publish, so it stays idle. The driver would need `pointcloud.enable:=true pointcloud.ordered_pc:=true`; the tab already remaps to `/camera/camera/depth/color/points` and uses `cloud_axes:=optical`.
 - **Don't run `moveit_sim.launch.py` or `pick_bottle` against the robot:** they are for the simulated arm and xArm gripper. The real robot has the AG-95 gripper and its own MoveIt (`silvanus_robot/scout_xarm_moveit_config`). `pick_bottle` would sit waiting for the sim's gripper controller before moving, but don't rely on that.
 
 ### Troubleshooting

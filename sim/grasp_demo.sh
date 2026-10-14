@@ -12,6 +12,11 @@
 #   GRASPNET=1 ./sim/grasp_demo.sh  # also run the Contact-GraspNet server and use its grasps
 #                                   # as a fallback when no body grasp is reachable
 #
+#   ROBOT=1 ./sim/grasp_demo.sh  # the REAL robot instead of Gazebo: every tab exports
+#                                # ROS_DOMAIN_ID=42, ROS_STATIC_PEERS=$ROBOT_IP,
+#                                # ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET, unsets
+#                                # ROS_LOCALHOST_ONLY; runs detector, localizer and grasp
+#                                # (no sim/setup tabs; moveit/pick are sim-only and skipped)
 #   PICK=0 ./sim/grasp_demo.sh   # detection only: the three far bottles + observation pose,
 #                                # no moveit / pick tabs
 #
@@ -28,7 +33,9 @@ CGN_DIR="${CGN_DIR:-$HOME/contact_graspnet_pytorch}"
 CGN_ENV="${CGN_ENV:-cgn_torch}"
 VENV="${VENV:-$HOME/silvanus_venv}"
 WORLD="${WORLD:-weston_robot_empty}"
-DOMAIN="${DOMAIN:-0}"
+ROBOT="${ROBOT:-0}"
+ROBOT_IP="${ROBOT_IP:-192.168.1.102}"
+if [ "$ROBOT" = 1 ]; then DOMAIN="${DOMAIN:-42}"; else DOMAIN="${DOMAIN:-0}"; fi
 PICK="${PICK:-1}"
 GRASPNET="${GRASPNET:-0}"
 
@@ -37,6 +44,7 @@ if [ "${1:-}" = "stop" ]; then
     pkill -INT -f 'ros2 launch bottle_perception' || true
     pkill -INT -f 'grasp_pipeline/grasp_inference' || true
     pkill -INT -f 'bottle_perception/bottle_localizer' || true
+    pkill -INT -f 'rqt_image_view' || true
     pkill -INT -f 'grasp_pipeline/pick_bottle' || true
     pkill -INT -f 'ros2 launch grasp_pipeline' || true
     pkill -INT -f 'python grasp_server.py' || true
@@ -64,6 +72,13 @@ source '$SIM_WS/install/setup.bash'
 source '$REPO/install/setup.bash'
 export ROS_DOMAIN_ID=$DOMAIN
 cd '$REPO'"
+if [ "$ROBOT" = 1 ]; then
+    # Reach the robot's ROS graph over the network
+    ROS_ENV="$ROS_ENV
+export ROS_STATIC_PEERS=$ROBOT_IP
+unset ROS_LOCALHOST_ONLY
+export ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET"
+fi
 
 # tab <name> <environment setup> <command>
 tab() {
@@ -93,6 +108,20 @@ if [ "$PICK" = 1 ]; then
     SETUP_CMD="$WAIT_ARM; ./sim/spawn_pick_bottle.sh $WORLD"
 else
     SETUP_CMD="$WAIT_ARM; ./sim/spawn_bottles.sh $WORLD && ./sim/observation_pose.sh"
+fi
+
+if [ "$ROBOT" = 1 ]; then
+    # Real robot: its own bringup runs the camera, arm and MoveIt. Perception only here:
+    # moveit_sim.launch.py would start a second move_group next to the robot's, and
+    # pick_bottle drives the simulated xArm gripper, not the robot's AG-95.
+    tab detector "$ROS_ENV
+source '$VENV/bin/activate'" "ros2 launch bottle_perception detector.launch.py use_sim_time:=false"
+    tab localizer "$ROS_ENV" "ros2 run bottle_perception bottle_localizer --ros-args -p depth_topic:=/camera/depth/image_rect_raw -p target_frame:=base_footprint"
+    tab grasp "$ROS_ENV" "ros2 run grasp_pipeline grasp_inference --ros-args -p use_graspnet:=false -p cloud_axes:=optical"
+    tab image "$ROS_ENV" "ros2 run rqt_image_view rqt_image_view /bottles/image_annotated"
+    echo "Robot mode (ROS_DOMAIN_ID=$DOMAIN, robot $ROBOT_IP): detector, localizer, grasp, image."
+    echo "moveit/pick are not started: they are for the simulated arm, not the real one."
+    exit 0
 fi
 
 # Contact-GraspNet: always in the detection-only demo, otherwise only with GRASPNET=1

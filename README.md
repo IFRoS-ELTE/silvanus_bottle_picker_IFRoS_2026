@@ -343,9 +343,10 @@ The robot's bringup (`silvanus-up.sh`, ROS domain **42**) starts the D435 with t
 
 `bottle_localizer` handles unaligned depth itself, using the depth camera's own `camera_info` and the depth→color TF, so the robot's camera launch doesn't need changing.
 
-**Quick start:** `./robot/robot_demo.sh` opens `detector`, `localizer`, `image` (YOLO boxes) and `shell` tabs in your gnome-terminal window. Every tab is set up for the robot: the venv, ROS, this workspace, `ROS_DOMAIN_ID=42`, `ROS_STATIC_PEERS=192.168.1.102`, `ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET`, and `ROS_LOCALHOST_ONLY` unset.
-- `./robot/robot_demo.sh stop` stops it.
-- Override with `VENV` (default `~/venvs/yolo`), `WS`, `ROBOT_IP`, `DOMAIN` and `TARGET_FRAME` (default `base_footprint`).
+**Quick start:** `ROBOT=1 ./sim/grasp_demo.sh` (the `robot-demo` alias) opens the same kind of tabs as the sim demo, but for the robot: `detector`, `localizer`, `grasp` and `image` (YOLO boxes).
+- **Environment:** every tab gets the same environment as the sim demo, plus `ROS_DOMAIN_ID=42`, `ROS_STATIC_PEERS=192.168.1.102` (`ROBOT_IP`), `ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET`, and `ROS_LOCALHOST_ONLY` unset.
+- **Not started:** `sim`, `setup`, `moveit` and `pick`. The robot's own bringup runs the camera, arm and MoveIt, and `pick_bottle` is for the simulated gripper.
+- **Stop:** `./sim/grasp_demo.sh stop`.
 
 By hand, in every terminal after the usual sourcing:
 

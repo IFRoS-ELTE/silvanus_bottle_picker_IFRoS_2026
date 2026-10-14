@@ -17,18 +17,32 @@ Parameters (change with --ros-args -p name:=value):
     device        '' = automatic (GPU if available), 'cpu', or '0' for the first GPU.
 """
 
+import os
 import signal
+import sys
 import time
 
-import rclpy
-from rclpy.executors import ExternalShutdownException
-from rclpy.node import Node
-from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy
-from sensor_msgs.msg import Image
-from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithPose
-from cv_bridge import CvBridge
+try:
+    import rclpy
+    from rclpy.executors import ExternalShutdownException
+    from rclpy.node import Node
+    from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy
+    from sensor_msgs.msg import Image
+    from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithPose
+    from cv_bridge import CvBridge
 
-from ultralytics import YOLO
+    from ultralytics import YOLO
+except ImportError as err:
+    # This needs a Python with both ROS and ultralytics: the venv from the README
+    # (python3 -m venv --system-site-packages). Started under another one (e.g. conda's
+    # (base), which can't load ROS, or the system one without ultralytics), restart under it.
+    venv = os.path.expanduser(os.environ.get('SILVANUS_VENV', '~/silvanus_venv'))
+    venv_python = os.path.join(venv, 'bin', 'python3')
+    if os.path.exists(venv_python) and os.path.realpath(sys.prefix) != os.path.realpath(venv):
+        os.execv(venv_python, [venv_python] + sys.argv)
+    sys.exit(f'bottle_detector: {err}. It needs ROS and ultralytics in the same Python: run '
+             f'"conda deactivate" and "source {venv}/bin/activate" (venv set up as in the '
+             'README), or set SILVANUS_VENV to your venv.')
 
 
 class BottleDetector(Node):

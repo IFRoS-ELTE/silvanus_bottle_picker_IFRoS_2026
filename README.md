@@ -335,18 +335,25 @@ print(len(s.recv()) // (17 * 4))
 - **Grasping in Gazebo:** the bottle still slips out of the gripper when lifted. In this sim the joints follow the controller's velocity command, so `pick_bottle` keeps the fingers closing slowly to make them press. Even so, the finger–bottle contact doesn't hold, and has once launched the bottle across the world. A reliable sim pick likely needs a grasp attach (Gazebo `DetachableJoint`) or tuned finger friction and contact stiffness in `scout_xarm_description`.
 - **Contact-GraspNet randomness:** it samples its input points randomly, so the same cloud does not always give the same grasps.
 
-### Real D435 camera (not yet tested end-to-end)
+### Real robot: detection and localization (not yet tested end-to-end)
 
-Start the driver with aligned depth and an organized point cloud, then remap the client's topics to the driver's names and switch the cloud axes:
+The robot's bringup (`silvanus-up.sh`, ROS domain **42**) starts the D435 with the driver's defaults:
+- color on `/camera/color/image_raw`;
+- depth on `/camera/depth/image_rect_raw`, **not aligned** to color.
+
+`bottle_localizer` handles unaligned depth itself, using the depth camera's own `camera_info` and the depth→color TF, so the robot's camera launch doesn't need changing. In every terminal, after the usual sourcing:
 
 ```bash
-ros2 launch realsense2_camera rs_launch.py align_depth.enable:=true pointcloud.enable:=true pointcloud.ordered_pc:=true
-ros2 run grasp_pipeline grasp_inference --ros-args -p cloud_axes:=optical \
-  -r /camera/depth/points:=/camera/camera/depth/color/points \
-  -r /camera/color/camera_info:=/camera/camera/color/camera_info
+export ROS_DOMAIN_ID=42
+ros2 launch bottle_perception detector.launch.py use_sim_time:=false
+ros2 run bottle_perception bottle_localizer --ros-args -p depth_topic:=/camera/depth/image_rect_raw
 ```
 
-Run the detector with `use_sim_time:=false` and the matching `image_topic`. `moveit_sim.launch.py` and `pick_bottle` are for the simulated robot (xArm gripper); the real robot uses the AG-95 and `silvanus_robot/scout_xarm_moveit_config`.
+- **Frame:** the localizer publishes in `odom`, which only exists while the base driver runs. With `--no-base`, add `-p target_frame:=base_footprint`.
+- **Python:** both nodes pick the right Python themselves, even with conda's `(base)` active. `bottle_localizer` restarts under the system Python. `bottle_detector` restarts under the venv at `~/silvanus_venv` (or `$SILVANUS_VENV`).
+- **YOLO weights:** the robot has no internet, so they must already be downloaded (they are after one run on your laptop). Run the nodes on your laptop, connected to the robot's network.
+- **`grasp_inference` with Contact-GraspNet:** needs an organized point cloud, which the robot doesn't publish by default. That needs `pointcloud.enable:=true pointcloud.ordered_pc:=true` on the driver, plus `-p cloud_axes:=optical` and remapping `/camera/depth/points` to the driver's cloud topic.
+- **Don't run `moveit_sim.launch.py` or `pick_bottle` against the robot:** they are for the simulated arm and xArm gripper. The real robot has the AG-95 gripper and its own MoveIt (`silvanus_robot/scout_xarm_moveit_config`). `pick_bottle` would sit waiting for the sim's gripper controller before moving, but don't rely on that.
 
 ### Troubleshooting
 
@@ -364,6 +371,7 @@ Run the detector with `use_sim_time:=false` and the matching `image_topic`. `mov
 | `pick_bottle`: `gripper closed on nothing` / `the bottle slipped out while lifting` | The grasp missed, or the sim's contact physics let the bottle go (see Known limitations). |
 | `pick_bottle` keeps waiting for `/move_action` | `moveit_sim.launch.py` isn't running, or is on a different `ROS_DOMAIN_ID`. |
 | CUDA out-of-memory on the server | Close other GPU users. `forward_passes` is already 1. |
+| `bottle_localizer`: `No module named 'numpy'` (older builds) | conda's `(base)` Python was used. Rebuild `bottle_perception`; the node now restarts under the system Python by itself. |
 | `ModuleNotFoundError: No module named 'ultralytics'` | Either the venv isn't active, or the package was built with `--symlink-install` (check `head -1 install/bottle_perception/lib/bottle_perception/bottle_detector`). Remove `build/bottle_perception` and `install/bottle_perception`, then rebuild without that flag. |
 | `ImportError` / NumPy errors from `cv_bridge` | NumPy 2 is installed in the venv. Reinstall with `pip install "numpy<2"`. |
 

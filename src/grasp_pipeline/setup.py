@@ -1,3 +1,5 @@
+from glob import glob
+
 from setuptools import find_packages, setup
 
 package_name = 'grasp_pipeline'
@@ -10,6 +12,8 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/config', glob('config/*')),
+        ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -24,7 +28,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-		    'grasp_inference = grasp_pipeline.grasp_inference_node:main',
+            'grasp_inference = grasp_pipeline.grasp_inference_node:main',
+            'pick_bottle = grasp_pipeline.pick_node:main',
         ],
     },
 )

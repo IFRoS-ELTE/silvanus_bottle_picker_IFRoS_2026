@@ -4,7 +4,7 @@ Grasp inference runs outside ROS, in its own conda environment, and talks to the
 `grasp_pipeline` ROS 2 node (`src/grasp_pipeline`) over ZeroMQ on `tcp://127.0.0.1:5555`.
 
 The node sends a cropped point cloud as raw `float32` bytes (N x 3) and gets back the
-best grasp as a 4x4 `float32` matrix, or an empty reply when no grasp is found.
+top 10 grasps, best first, each as 17 `float32` values (a row-major 4x4 matrix followed by its score), or an empty reply when no grasp is found.
 
 Each `grasp_server.py` has to be copied into the root of the matching upstream repo,
 because it loads the model code and checkpoints relative to its own location:

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- MoveIt semantics for the SIMULATED Silvanus robot (scout base + xArm6 + xArm gripper).
+     The real robot uses the AG-95 and silvanus_robot/scout_xarm_moveit_config instead. -->
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="scout_xarm">
+  <!-- UFactory's xArm6 groups (xarm6 up to link_tcp, xarm_gripper on drive_joint),
+       poses and arm/gripper self-collision matrix -->
+  <xacro:include filename="$(find xarm_moveit_config)/srdf/xarm_macro.srdf.xacro"/>
+  <xacro:xarm_macro_srdf prefix="" dof="6" robot_type="xarm"
+                          add_gripper="true" add_vacuum_gripper="false"
+                          add_bio_gripper="false" add_other_geometry="false"/>
+
+  <!-- The wheels are driven by the base controller, never by MoveIt -->
+  <passive_joint name="front_left_wheel"/>
+  <passive_joint name="front_right_wheel"/>
+  <passive_joint name="rear_left_wheel"/>
+  <passive_joint name="rear_right_wheel"/>
+
+  <!-- Base chain pairs, same as silvanus_robot/scout_xarm_moveit_config -->
+  <disable_collisions link1="base_footprint" link2="base_link" reason="Adjacent"/>
+  <disable_collisions link1="base_link" link2="front_left_wheel_link" reason="Adjacent"/>
+  <disable_collisions link1="base_link" link2="front_right_wheel_link" reason="Adjacent"/>
+  <disable_collisions link1="base_link" link2="rear_left_wheel_link" reason="Adjacent"/>
+  <disable_collisions link1="base_link" link2="rear_right_wheel_link" reason="Adjacent"/>
+  <disable_collisions link1="base_link" link2="box_link" reason="Adjacent"/>
+  <disable_collisions link1="base_link" link2="rslidar" reason="Adjacent"/>
+  <disable_collisions link1="box_link" link2="arm_mount_cylinder" reason="Adjacent"/>
+  <disable_collisions link1="arm_mount_cylinder" link2="arm_base" reason="Adjacent"/>
+  <disable_collisions link1="arm_base" link2="link_base" reason="Adjacent"/>
+</robot>

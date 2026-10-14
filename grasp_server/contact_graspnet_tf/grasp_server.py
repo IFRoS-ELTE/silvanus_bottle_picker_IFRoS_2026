@@ -1,4 +1,8 @@
 import zmq
+
+# Grasps returned per request, best score first. Reply: TOP_K x 17 float32 per grasp
+# (row-major 4x4 matrix, then the score); empty when there is none.
+TOP_K = 10
 import numpy as np
 import tensorflow as tf
 tf.compat.v1.disable_eager_execution()
@@ -52,9 +56,11 @@ def main():
 
             g, s = pred_grasps.get(-1), scores.get(-1)
             if g is not None and len(s) > 0:
-                best = int(np.argmax(s))
-                socket.send(g[best].astype(np.float32).tobytes())
-                print(f"Success. Best score: {s[best]:.3f}", flush=True)
+                order = np.argsort(s)[::-1][:TOP_K]
+                reply = np.concatenate([np.append(g[i].astype(np.float32).ravel(), np.float32(s[i]))
+                                        for i in order]).astype(np.float32)
+                socket.send(reply.tobytes())
+                print(f"Success. {len(s)} grasps, sent {len(order)}, best score: {s[order[0]]:.3f}", flush=True)
             else:
                 socket.send(b"")
                 print("No grasps found.", flush=True)

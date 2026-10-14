@@ -2,24 +2,64 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
+from geometry_msgs.msg import PoseArray, PoseStamped
 from sensor_msgs.msg import CameraInfo, PointCloud2
 from vision_msgs.msg import Detection2DArray
+from visualization_msgs.msg import Marker
 import sensor_msgs_py.point_cloud2 as pc2
 import numpy as np
+import tf2_ros
 import zmq
+
+from grasp_pipeline.geometry import matrix_to_pose, matrix_to_quaternion, transform_to_matrix
 
 SERVER_TIMEOUT_MS = 30000
 # A detection older than this relative to the point cloud is not used for cropping
 DETECTION_MAX_AGE_S = 1.0
+# Server reply: per grasp a row-major 4x4 matrix then its score, best first
+FLOATS_PER_GRASP = 17
 
 class GraspInferenceClient(Node):
     def __init__(self):
         super().__init__('grasp_inference_client')
+
+        # Gazebo's rgbd point cloud uses camera-link axes (x forward, y left, z up) even though
+        # the bridge labels it camera_depth_optical_frame. A real RealSense publishes true
+        # optical axes (x right, y down, z forward): use cloud_axes:=optical there.
+        self.declare_parameter('cloud_axes', 'gazebo')
+        self.cloud_axes = self.get_parameter('cloud_axes').value
+        # Keep cloud points this close to the bottle centre (m). 0.15 already lets the robot's
+        # front bumper in from the side view, and grasps drift 2-5 cm off the bottle.
+        self.declare_parameter('crop_radius', 0.10)
+        self.crop_radius = float(self.get_parameter('crop_radius').value)
+        # Re-centre the grasp on the points between the fingers (see refine_grasp)
+        self.declare_parameter('refine_grasp', True)
+        self.declare_parameter('gripper_half_opening', 0.0425)  # xArm gripper opens 85 mm
+        self.refine = bool(self.get_parameter('refine_grasp').value)
+        self.half_opening = float(self.get_parameter('gripper_half_opening').value)
+        # false: only estimate and publish the bottle, never call the Contact-GraspNet server
+        self.declare_parameter('use_graspnet', True)
+        self.use_graspnet = bool(self.get_parameter('use_graspnet').value)
+        # Frame whose z = 0 is the ground; the bottle axis is estimated and published in it
+        self.declare_parameter('ground_frame', 'base_footprint')
+        self.declare_parameter('ground_clearance', 0.01)  # points lower than this are ground
+        self.ground_frame = self.get_parameter('ground_frame').value
+        self.ground_clearance = float(self.get_parameter('ground_clearance').value)
+        # Points reaching higher than this: standing bottle (vertical axis), else lying
+        self.declare_parameter('lying_max_height', 0.12)
+        self.lying_max_height = float(self.get_parameter('lying_max_height').value)
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        if self.cloud_axes not in ('gazebo', 'optical'):
+            raise ValueError("cloud_axes must be 'gazebo' or 'optical'")
         
         # 1. Setup ZMQ Client to talk to the Python 3.7 Conda environment
-        self.get_logger().info('Connecting to Contact-GraspNet server...')
         self.zmq_context = zmq.Context()
-        self.connect_to_server()
+        if self.use_graspnet:
+            self.get_logger().info('Connecting to Contact-GraspNet server...')
+            self.connect_to_server()
+        else:
+            self.get_logger().info('use_graspnet is false: only estimating the bottle')
 
         # 2. Subscribe to RealSense (Updated for simulation topic)
         self.subscription = self.create_subscription(
@@ -43,6 +83,15 @@ class GraspInferenceClient(Node):
             self.camera_info_callback,
             qos_profile_sensor_data
         )
+        # Grasps in the point cloud's frame, Contact-GraspNet convention
+        # (z = approach, x = finger closing direction, fingers 0.1034 m along z).
+        # /grasp/pose is the best-scoring one, /grasp/candidates all of them, best score first.
+        self.grasp_pub = self.create_publisher(PoseStamped, '/grasp/pose', 10)
+        self.candidates_pub = self.create_publisher(PoseArray, '/grasp/candidates', 10)
+        # Bottle estimated from the same cloud, as a cylinder in ground_frame with the cloud's
+        # stamp: pose = centre, orientation z = axis, scale.x = diameter, scale.z = length.
+        # Also viewable in RViz.
+        self.bottle_pub = self.create_publisher(Marker, '/grasp/bottle', 10)
         self.latest_detections = None
         self.color_size = None # (width, height) of the color image
         self.is_predicting = False
@@ -89,6 +138,139 @@ class GraspInferenceClient(Node):
         ymax = int(min(cloud_msg.height, (v + hh) * sy + 1))
         return xmin, ymin, xmax, ymax
 
+    def crop_bottle(self, points_3d, bbox):
+        """Points of the box that lie within crop_radius of the bottle, or None.
+
+        The 2D box also covers whatever is in front of or behind the bottle (the robot's own
+        gripper and bumper), and Contact-GraspNet happily grasps those. The bottle centre is
+        taken as the median of the middle of the box, like bottle_localizer does.
+        """
+        xmin, ymin, xmax, ymax = bbox
+        box = points_3d[ymin:ymax, xmin:xmax, :]
+        h, w = box.shape[:2]
+        mh, mw = max(1, int(h * 0.15)), max(1, int(w * 0.15))
+        middle = box[h // 2 - mh:h // 2 + mh + 1, w // 2 - mw:w // 2 + mw + 1].reshape(-1, 3)
+        # Gazebo marks pixels beyond the depth range as +-inf, a real camera as NaN
+        middle = middle[np.isfinite(middle).all(axis=1)]
+        if middle.shape[0] < 10:
+            return None
+        center = np.median(middle, axis=0)
+
+        points = box.reshape(-1, 3)
+        points = points[np.isfinite(points).all(axis=1)]
+        near = np.linalg.norm(points - center, axis=1) < self.crop_radius
+        return points[near].astype(np.float32)
+
+    def refine_grasp(self, G, points, half_side=0.04, finger_depth=0.1034, below=0.03):
+        """Shift a Contact-GraspNet grasp so the fingers are centred on what is between them.
+
+        On a thin, half-visible bottle neck the network's grasp centre lands 2-4 cm off,
+        enough for the fingers to close on air. Take the cloud points in the closing region
+        (grasp frame: |x| < half opening, |y| < half_side, just above the finger midpoint
+        along z) and move the grasp to the middle of their x and y extent.
+        """
+        G = G.astype(np.float64)
+        pts = points.astype(np.float64)
+        for _ in range(3):
+            fingers = G[:3, 3] + finger_depth * G[:3, 2]
+            local = (pts - fingers) @ G[:3, :3]
+            inside = ((np.abs(local[:, 0]) < self.half_opening) & (np.abs(local[:, 1]) < half_side)
+                      & (local[:, 2] > -below) & (local[:, 2] < 0.0))
+            if inside.sum() < 20:
+                break
+            dx = (local[inside, 0].min() + local[inside, 0].max()) / 2.0
+            dy = (local[inside, 1].min() + local[inside, 1].max()) / 2.0
+            G[:3, 3] += G[:3, 0] * dx + G[:3, 1] * dy
+        return G
+
+    @staticmethod
+    def estimate_bottle(points, camera, ground_clearance=0.01, lying_max_height=0.12):
+        """(centre, unit axis, radius, length) of the bottle as a cylinder, or None.
+
+        `points` and `camera` (the camera position) are in a frame whose z = 0 is the ground.
+        A bottle on the ground is either standing or lying, so the axis is taken as vertical
+        if the points reach higher than `lying_max_height`, else as horizontal with its
+        direction from the points' spread in xy. A free 3D fit (PCA) is avoided because depth
+        noise spreads the points along the camera rays, which a noisy sensor makes the
+        biggest spread. Only the camera-facing half of the bottle is visible, and those points
+        sit about pi/4 * radius in front of the axis, so the axis is moved back by that much.
+        Height and length only cover the cropped points (crop_radius), so a long bottle comes
+        out shorter than it is.
+        """
+        pts = points[points[:, 2] > ground_clearance].astype(np.float64)
+        if len(pts) < 50:
+            return None
+        mean = pts.mean(axis=0)
+        top = np.percentile(pts[:, 2], 98)
+        standing = top > lying_max_height
+        if standing:
+            axis = np.array([0.0, 0.0, 1.0])
+        else:
+            xy = pts[:, :2] - mean[:2]
+            direction = np.linalg.svd(xy, full_matrices=False)[2][0]
+            axis = np.array([direction[0], direction[1], 0.0])
+        view = mean - camera
+        away = view - (view @ axis) * axis
+        if np.linalg.norm(away) < 1e-6:  # looking straight down the axis: no width to measure
+            return None
+        away /= np.linalg.norm(away)
+        across = np.cross(axis, away)
+        # The camera samples the bottle evenly across its width, so the middle 80% of the points
+        # span 0.8 of the diameter; the outer 10% each side are where noisy stray points are
+        width = np.percentile((pts - mean) @ across, [10, 90])
+        radius = (width[1] - width[0]) / (2.0 * 0.8)
+        centre = mean + away * (np.pi / 4.0) * radius
+        if standing:  # from the ground up to the top
+            centre[2] = top / 2.0
+            length = top
+        else:
+            along = np.percentile((pts - centre) @ axis, [2, 98])
+            centre = centre + axis * (along[0] + along[1]) / 2.0
+            length = along[1] - along[0]
+        return centre, axis, radius, length
+
+    def publish_bottle(self, msg, points):
+        """Estimate the bottle from the crop (cloud frame) and publish it in ground_frame."""
+        try:
+            tf = self.tf_buffer.lookup_transform(self.ground_frame, msg.header.frame_id,
+                                                 Time.from_msg(msg.header.stamp))
+        except tf2_ros.TransformException:
+            try:  # nothing for that exact stamp yet; the camera is still when it matters
+                tf = self.tf_buffer.lookup_transform(self.ground_frame, msg.header.frame_id,
+                                                     Time())
+            except tf2_ros.TransformException as err:
+                self.get_logger().warn(f'No bottle estimate, TF failed: {err}',
+                                       throttle_duration_sec=2.0)
+                return
+        T = transform_to_matrix(tf.transform)
+        world = points.astype(np.float64) @ T[:3, :3].T + T[:3, 3]
+        bottle = self.estimate_bottle(world, T[:3, 3], self.ground_clearance,
+                                      self.lying_max_height)
+        if bottle is None:
+            self.get_logger().warn('No bottle estimate: too few points above the ground.',
+                                   throttle_duration_sec=2.0)
+            return
+        centre, axis, radius, length = bottle
+        # Any rotation whose z axis is the bottle axis
+        x = np.cross([0.0, 1.0, 0.0] if abs(axis[1]) < 0.9 else [1.0, 0.0, 0.0], axis)
+        x /= np.linalg.norm(x)
+        R = np.column_stack([x, np.cross(axis, x), axis])
+        marker = Marker()
+        marker.header.stamp = msg.header.stamp
+        marker.header.frame_id = self.ground_frame
+        marker.ns = 'bottle'
+        marker.type = Marker.CYLINDER
+        marker.action = Marker.ADD
+        marker.pose.position.x, marker.pose.position.y, marker.pose.position.z = (
+            float(v) for v in centre)
+        o = marker.pose.orientation
+        o.x, o.y, o.z, o.w = (float(v) for v in matrix_to_quaternion(R))
+        marker.scale.x = marker.scale.y = float(2.0 * radius)
+        marker.scale.z = float(length)
+        marker.color.g, marker.color.b, marker.color.a = 0.8, 0.3, 0.6
+        marker.lifetime.sec = 2
+        self.bottle_pub.publish(marker)
+
     def pointcloud_callback(self, msg: PointCloud2):
         # 1. Print this exactly ONCE so we know the topic connection is working
         self.get_logger().info('Point cloud received from simulation!', once=True)
@@ -114,14 +296,23 @@ class GraspInferenceClient(Node):
             return
         
         # 3. Crop the cloud to the detected bottle
-        xmin, ymin, xmax, ymax = bbox
-        cropped_3d_region = points_3d[ymin:ymax, xmin:xmax, :]
-        
-        flattened_crop = cropped_3d_region.reshape(-1, 3)
-        clean_points = flattened_crop[~np.isnan(flattened_crop).any(axis=1)].astype(np.float32)
+        clean_points = self.crop_bottle(points_3d, bbox)
+        if clean_points is None:
+            self.get_logger().warn('No valid depth at the centre of the bottle box.')
+            self.is_predicting = False
+            return
+        if self.cloud_axes == 'gazebo':
+            # Contact-GraspNet expects optical axes, and the grasp is published in the optical frame
+            clean_points = np.stack([-clean_points[:, 1], -clean_points[:, 2], clean_points[:, 0]],
+                                    axis=1)
 
         if clean_points.shape[0] < 100:
             self.get_logger().warn('Not enough valid depth points in bounding box.')
+            self.is_predicting = False
+            return
+
+        self.publish_bottle(msg, clean_points)
+        if not self.use_graspnet:
             self.is_predicting = False
             return
 
@@ -138,17 +329,30 @@ class GraspInferenceClient(Node):
             self.connect_to_server()
             self.is_predicting = False
             return
-        reply_bytes = self.zmq_socket.recv()
-        reply_array = np.frombuffer(reply_bytes, dtype=np.float32)
-        
-        if reply_array.size == 16:
-            best_4x4_matrix = reply_array.reshape(4, 4)
-            self.get_logger().info(f'Received Grasp Pose:\n{best_4x4_matrix}')
-            # TODO: Publish to tf2
+        reply_array = np.frombuffer(self.zmq_socket.recv(), dtype=np.float32)
+        self.is_predicting = False
+        if reply_array.size == 16:  # older grasp_server.py: best grasp only
+            grasps = [reply_array.reshape(4, 4)]
+        elif reply_array.size and reply_array.size % FLOATS_PER_GRASP == 0:
+            rows = reply_array.reshape(-1, FLOATS_PER_GRASP)
+            grasps = [row[:16].reshape(4, 4) for row in rows]
         else:
             self.get_logger().warn('No viable grasps returned from server.')
-            
-        self.is_predicting = False
+            return
+        if self.refine:
+            grasps = [self.refine_grasp(G, clean_points) for G in grasps]
+        grasps = [G.astype(np.float64) for G in grasps]
+        self.get_logger().info(f'Received {len(grasps)} grasps, best:\n{grasps[0]}')
+
+        candidates = PoseArray()
+        candidates.header = msg.header
+        candidates.poses = [matrix_to_pose(G) for G in grasps]
+        self.candidates_pub.publish(candidates)
+        best = PoseStamped()
+        best.header = msg.header
+        best.pose = candidates.poses[0]
+        self.grasp_pub.publish(best)
+
 
 def main(args=None):
     rclpy.init(args=args)

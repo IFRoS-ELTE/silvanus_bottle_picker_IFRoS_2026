@@ -24,8 +24,7 @@
 set -euo pipefail
 
 VENV="${VENV:-$HOME/venvs/yolo}"
-# The workspace this script is in, unless overridden (e.g. WS=~/silvanus_bottle_picker)
-WS="${WS:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+WS="${WS:-$HOME/workspaces/silvanus_bottle_picker_IFRoS_2026}"
 ROBOT_IP="${ROBOT_IP:-192.168.1.102}"
 DOMAIN="${DOMAIN:-42}"
 TARGET_FRAME="${TARGET_FRAME:-base_footprint}"

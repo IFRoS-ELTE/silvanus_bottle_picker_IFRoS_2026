@@ -210,6 +210,10 @@ The YOLO weights (`yolo11n.pt`) are downloaded automatically on first run.
 
 Use `ROS_DOMAIN_ID=0` for the simulation in every ROS terminal. (The real robot uses domain 42.)
 
+**Quick start:** `./sim/grasp_demo.sh` opens all five terminals below as tabs in your current gnome-terminal window. It waits for the sim's controllers before spawning bottles and moving the arm. `./sim/grasp_demo.sh stop` shuts everything down. Paths can be overridden with `SIM_WS`, `CGN_DIR`, `CGN_ENV`, `VENV`, `WORLD` and `DOMAIN`.
+
+To run the steps by hand instead:
+
 **Terminal 1: Gazebo**
 ```bash
 source ~/workspaces/scout_xarm_ros2/install/setup.bash

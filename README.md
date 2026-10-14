@@ -170,7 +170,8 @@ The network was trained for a Franka Panda gripper (80 mm opening). It therefore
 
 | Direction | Topic | Type |
 | --- | --- | --- |
-| Subscribes | `/camera/depth/points` | `sensor_msgs/PointCloud2` (must be **organized**, i.e. `height > 1`) |
+| Subscribes | `/camera/depth/points` | `sensor_msgs/PointCloud2` (must be **organized**, i.e. `height > 1`), unless `depth_topic` is set |
+| Subscribes | `depth_topic` + its `camera_info` | `sensor_msgs/Image` (16-bit mm or 32-bit float m) + `CameraInfo`: the cloud is built from these instead. Use depth aligned with the color image. |
 | Subscribes | `/bottles/detections` | `vision_msgs/Detection2DArray` |
 | Subscribes | `/camera/color/camera_info` | `sensor_msgs/CameraInfo` (used to scale boxes from color to cloud pixels) |
 | Publishes | `/grasp/bottle` | `visualization_msgs/Marker` (cylinder) in `base_footprint`: pose = centre, orientation z = axis, `scale.x` = diameter, `scale.z` = length. Also viewable in RViz. |
@@ -178,6 +179,8 @@ The network was trained for a Franka Panda gripper (80 mm opening). It therefore
 | Publishes | `/grasp/pose` | `geometry_msgs/PoseStamped` (only with `use_graspnet:=true`): the best-scoring grasp |
 
 Contact-GraspNet grasps use its own convention: z is the approach direction, x is the direction the fingers close in, and the point between the fingers is 0.1034 m along z from the origin.
+
+**Point cloud source:** by default it uses Gazebo's organized cloud. With `depth_topic` set, it builds the organized cloud itself from that depth image and its `camera_info` (`depth_info_topic`, default: the `camera_info` next to the depth topic). The real robot publishes no point cloud, so there it uses `/camera/camera/aligned_depth_to_color/image_raw`. Clouds are processed at most `max_rate` (5) times per second.
 
 What it does with each cloud:
 - **Detection:** uses the highest-confidence box, and only if its timestamp is within 1 s of the cloud's.
@@ -366,7 +369,12 @@ ros2 run rqt_image_view rqt_image_view /bottles/image_annotated
 - **Frame:** the localizer publishes in `odom`, which only exists while the base driver runs. With `--no-base`, add `-p target_frame:=base_footprint`.
 - **Python:** both nodes pick the right Python themselves, even with conda's `(base)` active. `bottle_localizer` restarts under the system Python. `bottle_detector` restarts under the venv at `~/silvanus_venv` (or `$SILVANUS_VENV`).
 - **YOLO weights:** the robot has no internet, so they must already be downloaded (they are after one run on your laptop). Run the nodes on your laptop, connected to the robot's network.
-- **`grasp_inference`** (the `grasp` tab): needs an organized point cloud, which the robot doesn't publish, so it stays idle. The driver would need `pointcloud.enable:=true pointcloud.ordered_pc:=true`; the tab already remaps to `/camera/camera/depth/color/points` and uses `cloud_axes:=optical`.
+- **`grasp_inference`** (the `grasp` tab): the robot publishes no point cloud, so it builds one from the aligned depth image:
+  ```bash
+  ros2 run grasp_pipeline grasp_inference --ros-args -p use_graspnet:=false \
+    -p depth_topic:=/camera/camera/aligned_depth_to_color/image_raw \
+    -r /camera/color/camera_info:=/camera/camera/color/camera_info
+  ```
 - **Don't run `moveit_sim.launch.py` or `pick_bottle` against the robot:** they are for the simulated arm and xArm gripper. The real robot has the AG-95 gripper and its own MoveIt (`silvanus_robot/scout_xarm_moveit_config`). `pick_bottle` would sit waiting for the sim's gripper controller before moving, but don't rely on that.
 
 ### Troubleshooting

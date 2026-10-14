@@ -1,9 +1,11 @@
+import time
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 from geometry_msgs.msg import PoseArray, PoseStamped
-from sensor_msgs.msg import CameraInfo, PointCloud2
+from sensor_msgs.msg import CameraInfo, Image, PointCloud2
 from vision_msgs.msg import Detection2DArray
 from visualization_msgs.msg import Marker
 import sensor_msgs_py.point_cloud2 as pc2
@@ -40,6 +42,20 @@ class GraspInferenceClient(Node):
         # false: only estimate and publish the bottle, never call the Contact-GraspNet server
         self.declare_parameter('use_graspnet', True)
         self.use_graspnet = bool(self.get_parameter('use_graspnet').value)
+        # Point cloud source. Empty depth_topic: the organized cloud on /camera/depth/points
+        # (Gazebo). Set (e.g. the real D435's /camera/camera/aligned_depth_to_color/image_raw):
+        # the cloud is built here from that depth image and its camera_info, which must be
+        # aligned with the color image the YOLO boxes come from. Then cloud_axes is ignored
+        # (the points are built in optical axes).
+        self.declare_parameter('depth_topic', '')
+        self.declare_parameter('depth_info_topic', '')  # default: camera_info next to depth_topic
+        self.declare_parameter('max_rate', 5.0)         # clouds processed per second at most
+        self.depth_topic = self.get_parameter('depth_topic').value
+        self.depth_info_topic = (self.get_parameter('depth_info_topic').value
+                                 or self.depth_topic.rsplit('/', 1)[0] + '/camera_info')
+        self.min_period = 1.0 / max(float(self.get_parameter('max_rate').value), 1e-3)
+        self.last_processed = 0.0
+        self.depth_K = None
         # Frame whose z = 0 is the ground; the bottle axis is estimated and published in it
         self.declare_parameter('ground_frame', 'base_footprint')
         self.declare_parameter('ground_clearance', 0.01)  # points lower than this are ground
@@ -61,13 +77,21 @@ class GraspInferenceClient(Node):
         else:
             self.get_logger().info('use_graspnet is false: only estimating the bottle')
 
-        # 2. Subscribe to RealSense (Updated for simulation topic)
-        self.subscription = self.create_subscription(
-            PointCloud2,
-            '/camera/depth/points', 
-            self.pointcloud_callback,
-            10
-        )
+        # 2. Point cloud: Gazebo's organized cloud, or built here from a depth image
+        if self.depth_topic:
+            self.create_subscription(Image, self.depth_topic, self.depth_callback,
+                                     qos_profile_sensor_data)
+            self.create_subscription(CameraInfo, self.depth_info_topic, self.depth_info_callback,
+                                     qos_profile_sensor_data)
+            self.get_logger().info(f'Building the point cloud from {self.depth_topic} '
+                                   f'and {self.depth_info_topic}')
+        else:
+            self.subscription = self.create_subscription(
+                PointCloud2,
+                '/camera/depth/points',
+                self.pointcloud_callback,
+                10
+            )
 
         # 3. Subscribe to the YOLO bounding boxes from bottle_perception
         self.create_subscription(
@@ -107,6 +131,52 @@ class GraspInferenceClient(Node):
 
     def camera_info_callback(self, msg: CameraInfo):
         self.color_size = (msg.width, msg.height)
+
+    def depth_info_callback(self, msg: CameraInfo):
+        self.depth_K = (msg.k[0], msg.k[4], msg.k[2], msg.k[5])
+
+    def depth_to_points(self, msg: Image):
+        """Organized (H, W, 3) cloud in the depth image's optical frame, NaN where no depth."""
+        if msg.encoding in ('16UC1', 'mono16'):    # real RealSense: millimetres
+            dtype, scale = np.uint16, 0.001
+        elif msg.encoding == '32FC1':               # Gazebo: metres
+            dtype, scale = np.float32, 1.0
+        else:
+            self.get_logger().error(f'Unsupported depth encoding {msg.encoding}', once=True)
+            return None
+        dt = np.dtype(dtype).newbyteorder('>' if msg.is_bigendian else '<')
+        row = msg.step // dt.itemsize
+        depth = (np.frombuffer(msg.data, dtype=dt).reshape(msg.height, row)[:, :msg.width]
+                 .astype(np.float32) * scale)
+        depth[~(depth > 0)] = np.nan              # 0 = no reading
+        fx, fy, cx, cy = self.depth_K
+        v, u = np.indices(depth.shape, dtype=np.float32)
+        return np.dstack([(u - cx) * depth / fx, (v - cy) * depth / fy, depth])
+
+    def depth_callback(self, msg: Image):
+        self.get_logger().info('Depth image received', once=True)
+        if self.is_predicting:
+            return
+        if self.depth_K is None:
+            self.get_logger().warn(f'Waiting for {self.depth_info_topic}...',
+                                   throttle_duration_sec=2.0)
+            return
+        now = time.monotonic()
+        if now - self.last_processed < self.min_period:
+            return
+        bbox = self.get_bottle_bbox(msg)  # an Image has the same header/width/height
+        if bbox is None:
+            return
+        self.last_processed = now
+        self.is_predicting = True
+        points_3d = self.depth_to_points(msg)
+        if points_3d is None:
+            self.is_predicting = False
+            return
+        try:
+            self.process_points(msg, points_3d, gazebo_axes=False)
+        finally:
+            self.is_predicting = False  # also if something raised
 
     def get_bottle_bbox(self, cloud_msg: PointCloud2):
         """Return the best bottle box as (xmin, ymin, xmax, ymax) in cloud pixels, or None."""
@@ -295,13 +365,28 @@ class GraspInferenceClient(Node):
             self.is_predicting = False
             return
         
+        try:
+            self.process_points(msg, points_3d, self.cloud_axes == 'gazebo', bbox)
+        finally:
+            self.is_predicting = False  # also if something raised
+
+    def process_points(self, msg, points_3d, gazebo_axes, bbox=None):
+        """Crop the organized cloud to the bottle, estimate it, and optionally get grasps.
+
+        `msg` is the cloud or depth image the points come from (header = frame and stamp).
+        """
+        if bbox is None:
+            bbox = self.get_bottle_bbox(msg)
+            if bbox is None:
+                self.is_predicting = False
+                return
         # 3. Crop the cloud to the detected bottle
         clean_points = self.crop_bottle(points_3d, bbox)
         if clean_points is None:
             self.get_logger().warn('No valid depth at the centre of the bottle box.')
             self.is_predicting = False
             return
-        if self.cloud_axes == 'gazebo':
+        if gazebo_axes:
             # Contact-GraspNet expects optical axes, and the grasp is published in the optical frame
             clean_points = np.stack([-clean_points[:, 1], -clean_points[:, 2], clean_points[:, 0]],
                                     axis=1)

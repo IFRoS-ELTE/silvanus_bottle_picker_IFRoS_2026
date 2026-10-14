@@ -119,8 +119,8 @@ if [ "$ROBOT" = 1 ]; then
     tab detector "$ROS_ENV
 source '$VENV/bin/activate'" "ros2 launch bottle_perception detector.launch.py use_sim_time:=false image_topic:=$CAM/color/image_raw"
     tab localizer "$ROS_ENV" "ros2 run bottle_perception bottle_localizer --ros-args -p depth_topic:=$CAM/aligned_depth_to_color/image_raw -p depth_info_topic:=$CAM/aligned_depth_to_color/camera_info -p camera_info_topic:=$CAM/color/camera_info -p target_frame:=base_footprint"
-    # Needs an organized point cloud, which the robot's driver doesn't publish (pointcloud.enable)
-    tab grasp "$ROS_ENV" "ros2 run grasp_pipeline grasp_inference --ros-args -p use_graspnet:=false -p cloud_axes:=optical -r /camera/color/camera_info:=$CAM/color/camera_info -r /camera/depth/points:=$CAM/depth/color/points"
+    # The robot publishes no point cloud: grasp_inference builds it from the aligned depth
+    tab grasp "$ROS_ENV" "ros2 run grasp_pipeline grasp_inference --ros-args -p use_graspnet:=false -p depth_topic:=$CAM/aligned_depth_to_color/image_raw -r /camera/color/camera_info:=$CAM/color/camera_info"
     tab image "$ROS_ENV" "ros2 run rqt_image_view rqt_image_view /bottles/image_annotated"
     echo "Robot mode (ROS_DOMAIN_ID=$DOMAIN, robot $ROBOT_IP): detector, localizer, grasp, image."
     echo "moveit/pick are not started: they are for the simulated arm, not the real one."

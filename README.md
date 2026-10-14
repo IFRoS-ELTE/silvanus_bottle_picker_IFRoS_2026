@@ -368,6 +368,7 @@ ros2 run rqt_image_view rqt_image_view /bottles/image_annotated
 
 - **Frame:** the localizer publishes in `odom`, which only exists while the base driver runs. With `--no-base`, add `-p target_frame:=base_footprint`.
 - **Python:** both nodes pick the right Python themselves, even with conda's `(base)` active. `bottle_localizer` restarts under the system Python. `bottle_detector` restarts under the venv at `~/silvanus_venv` (or `$SILVANUS_VENV`).
+- **Wi-Fi:** raw camera images are big, so robot mode subscribes to them reliably (`reliable:=true`) and accepts detections up to 5 s old (`detection_max_age:=5.0` on `grasp_inference`). If it is still slow, the real fix is on the robot: a lower camera resolution, or compressed images.
 - **YOLO weights:** the robot has no internet, so they must already be downloaded (they are after one run on your laptop). Run the nodes on your laptop, connected to the robot's network.
 - **`grasp_inference`** (the `grasp` tab): the robot publishes no point cloud, so it builds one from the aligned depth image:
   ```bash
@@ -385,7 +386,7 @@ ros2 run rqt_image_view rqt_image_view /bottles/image_annotated
 | `No reply from Contact-GraspNet server within 30 s` | The server isn't running or is stuck. Check `ss -tlnp \| grep 5555` and the server terminal. |
 | `Waiting for /bottles/detections and /camera/color/camera_info...` | The detector isn't running, or `ROS_DOMAIN_ID` differs between terminals. |
 | `No bottle detected.` | YOLO doesn't recognise the bottle from this camera angle, or it isn't in view. Watch `/bottles/image_annotated`. |
-| `Latest bottle detection is too old for this point cloud` | The detector is slow or stopped. Check whether YOLO is running on the CPU (`device` parameter). |
+| `Latest bottle detection is ... s older than this point cloud` | The detector gets images slowly; its tab shows the FPS. On the real robot over Wi-Fi, raw 1280x720 frames (2.7 MB, hundreds of UDP fragments) are almost all lost with best-effort QoS, giving 0.0–0.1 FPS. Use `reliable:=true` on the detector, localizer and `grasp_inference` (robot mode does), and raise `detection_max_age` (robot mode: 5 s). Otherwise check whether YOLO runs on the CPU (`device` parameter). |
 | `point cloud is unorganized` | The camera publishes a flat cloud (`height == 1`). The 2D box crop needs an organized cloud. |
 | `Not enough valid depth points in bounding box` | The bottle is too far away, too small, or outside the depth range. Move the arm or the bottle closer. |
 | `pick_bottle` keeps `Waiting for the bottle on /bottles/positions` | `bottle_localizer` isn't running, or YOLO doesn't see the bottle from the pick view pose. |

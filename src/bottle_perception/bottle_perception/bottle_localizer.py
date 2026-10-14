@@ -35,7 +35,7 @@ except ImportError:
     raise
 from rclpy.duration import Duration
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, Image
 from vision_msgs.msg import Detection2DArray
@@ -51,7 +51,7 @@ class BottleLocalizer(Node):
         super().__init__('bottle_localizer')
 
         # --- Parameters (can be changed with -p name:=value) -----------------
-        self.declare_parameter('depth_topic', '/camera/depth/image_raw')  # real: .../image_rect_raw
+        self.declare_parameter('depth_topic', '/camera/depth/image_rect_raw')  # real: .../image_rect_raw
         self.declare_parameter('depth_info_topic', '/camera/depth/camera_info')
         self.declare_parameter('camera_info_topic', '/camera/color/camera_info')
         self.declare_parameter('target_frame', 'odom')    # frame in which we publish
@@ -59,6 +59,7 @@ class BottleLocalizer(Node):
         self.declare_parameter('max_depth', 4.0)          # ignore readings further than this (m)
         self.declare_parameter('bottle_radius', 0.035)    # camera sees the surface, not the center axis
         self.declare_parameter('pixel_step', 2)           # use every n-th depth pixel (speed)
+        self.declare_parameter('reliable', False)         # true over Wi-Fi (real robot)
 
         self.target_frame = self.get_parameter('target_frame').value
         self.roi = float(self.get_parameter('roi_fraction').value)
@@ -82,8 +83,13 @@ class BottleLocalizer(Node):
         # --- Inputs and outputs -------------------------------------------
         self.create_subscription(CameraInfo, self.get_parameter('camera_info_topic').value,
                                  self.on_info, qos_profile_sensor_data)
+        image_qos = qos_profile_sensor_data
+        if self.get_parameter('reliable').value:
+            # Over Wi-Fi best effort drops a whole image when one of its fragments is lost
+            image_qos = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
+                                   reliability=ReliabilityPolicy.RELIABLE)
         self.create_subscription(Image, self.get_parameter('depth_topic').value,
-                                 self.on_depth, qos_profile_sensor_data)
+                                 self.on_depth, image_qos)
         self.create_subscription(CameraInfo, self.get_parameter('depth_info_topic').value,
                                  self.on_depth_info, qos_profile_sensor_data)
         self.create_subscription(Detection2DArray, '/bottles/detections',

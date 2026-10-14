@@ -2,7 +2,7 @@ import time
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.time import Time
 from geometry_msgs.msg import PoseArray, PoseStamped
 from sensor_msgs.msg import CameraInfo, Image, PointCloud2
@@ -16,8 +16,6 @@ import zmq
 from grasp_pipeline.geometry import matrix_to_pose, matrix_to_quaternion, transform_to_matrix
 
 SERVER_TIMEOUT_MS = 30000
-# A detection older than this relative to the point cloud is not used for cropping
-DETECTION_MAX_AGE_S = 1.0
 # Server reply: per grasp a row-major 4x4 matrix then its score, best first
 FLOATS_PER_GRASP = 17
 
@@ -50,6 +48,12 @@ class GraspInferenceClient(Node):
         self.declare_parameter('depth_topic', '')
         self.declare_parameter('depth_info_topic', '')  # default: camera_info next to depth_topic
         self.declare_parameter('max_rate', 5.0)         # clouds processed per second at most
+        # true over Wi-Fi (real robot): best effort drops a whole image if a fragment is lost
+        self.declare_parameter('reliable', False)
+        # A detection older than this relative to the cloud is not used for cropping (s).
+        # Raise it when detections come slowly; fine while the camera and bottle are still.
+        self.declare_parameter('detection_max_age', 1.0)
+        self.detection_max_age = float(self.get_parameter('detection_max_age').value)
         self.depth_topic = self.get_parameter('depth_topic').value
         self.depth_info_topic = (self.get_parameter('depth_info_topic').value
                                  or self.depth_topic.rsplit('/', 1)[0] + '/camera_info')
@@ -79,8 +83,11 @@ class GraspInferenceClient(Node):
 
         # 2. Point cloud: Gazebo's organized cloud, or built here from a depth image
         if self.depth_topic:
-            self.create_subscription(Image, self.depth_topic, self.depth_callback,
-                                     qos_profile_sensor_data)
+            image_qos = qos_profile_sensor_data
+            if self.get_parameter('reliable').value:
+                image_qos = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
+                                       reliability=ReliabilityPolicy.RELIABLE)
+            self.create_subscription(Image, self.depth_topic, self.depth_callback, image_qos)
             self.create_subscription(CameraInfo, self.depth_info_topic, self.depth_info_callback,
                                      qos_profile_sensor_data)
             self.get_logger().info(f'Building the point cloud from {self.depth_topic} '
@@ -186,9 +193,11 @@ class GraspInferenceClient(Node):
             return None
 
         age = Time.from_msg(cloud_msg.header.stamp) - Time.from_msg(self.latest_detections.header.stamp)
-        if abs(age.nanoseconds) > DETECTION_MAX_AGE_S * 1e9:
-            self.get_logger().warn('Latest bottle detection is too old for this point cloud.',
-                                   throttle_duration_sec=2.0)
+        if abs(age.nanoseconds) > self.detection_max_age * 1e9:
+            self.get_logger().warn(
+                f'Latest bottle detection is {abs(age.nanoseconds) / 1e9:.1f} s older than this '
+                f'point cloud (detection_max_age = {self.detection_max_age} s). Is the detector '
+                'getting images? Over Wi-Fi use reliable:=true.', throttle_duration_sec=2.0)
             return None
 
         detections = [d for d in self.latest_detections.detections if d.results]

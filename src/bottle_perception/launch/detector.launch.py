@@ -18,6 +18,8 @@ def generate_launch_description():
         DeclareLaunchArgument('confidence', default_value='0.25',
                               description='Confianza minima (0-1) para aceptar una deteccion'),
         DeclareLaunchArgument('image_topic', default_value='/camera/color/image_raw'),
+        DeclareLaunchArgument('reliable', default_value='false',
+                              description='true over Wi-Fi (real robot): best effort loses big images'),
     ]
     detector = Node(
         package='bottle_perception',
@@ -29,6 +31,7 @@ def generate_launch_description():
             'model': LaunchConfiguration('model'),
             'confidence': LaunchConfiguration('confidence'),
             'image_topic': LaunchConfiguration('image_topic'),
+            'reliable': LaunchConfiguration('reliable'),
         }],
     )
     return LaunchDescription(args + [detector])

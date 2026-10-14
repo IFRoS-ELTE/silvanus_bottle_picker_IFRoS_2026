@@ -55,6 +55,9 @@ class BottleDetector(Node):
         self.declare_parameter('confidence', 0.25)
         self.declare_parameter('classes', ['bottle'])
         self.declare_parameter('device', '')
+        # true over Wi-Fi (the real robot): a raw 1280x720 image is hundreds of UDP fragments,
+        # and best effort drops the whole image when one is lost, so almost none arrive
+        self.declare_parameter('reliable', False)
 
         model_path = self.get_parameter('model').value
         image_topic = self.get_parameter('image_topic').value
@@ -78,11 +81,14 @@ class BottleDetector(Node):
 
         # --- ROS: inputsvand outputs ---------------------------------------
         self.bridge = CvBridge()  # convierte sensor_msgs/Image <-> imagen de OpenCV
-        # Profundidad 1 + BEST_EFFORT: si YOLO va mas lento que la camara, nos
-        # quedamos siempre con la imagen MAS RECIENTE y se descartan las viejas.
+        # Profundidad 1: si YOLO va mas lento que la camara, nos quedamos siempre con la
+        # imagen MAS RECIENTE y se descartan las viejas. BEST_EFFORT por defecto; RELIABLE
+        # (parametro reliable) a traves de Wi-Fi, donde BEST_EFFORT pierde casi todas.
+        reliable = bool(self.get_parameter('reliable').value)
         sensor_qos = QoSProfile(depth=1,
                                 history=HistoryPolicy.KEEP_LAST,
-                                reliability=ReliabilityPolicy.BEST_EFFORT)
+                                reliability=(ReliabilityPolicy.RELIABLE if reliable
+                                             else ReliabilityPolicy.BEST_EFFORT))
         self.create_subscription(Image, image_topic, self.on_image, sensor_qos)
         self.det_pub = self.create_publisher(Detection2DArray, '/bottles/detections', 10)
         self.img_pub = self.create_publisher(Image, '/bottles/image_annotated', 10)

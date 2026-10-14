@@ -341,7 +341,13 @@ The robot's bringup (`silvanus-up.sh`, ROS domain **42**) starts the D435 with t
 - color on `/camera/color/image_raw`;
 - depth on `/camera/depth/image_rect_raw`, **not aligned** to color.
 
-`bottle_localizer` handles unaligned depth itself, using the depth camera's own `camera_info` and the depth→color TF, so the robot's camera launch doesn't need changing. In every terminal, after the usual sourcing:
+`bottle_localizer` handles unaligned depth itself, using the depth camera's own `camera_info` and the depth→color TF, so the robot's camera launch doesn't need changing.
+
+**Quick start:** `./robot/robot_demo.sh` opens `detector`, `localizer`, `image` (YOLO boxes) and `shell` tabs in your gnome-terminal window. Every tab is set up for the robot: the venv, ROS, this workspace, `ROS_DOMAIN_ID=42`, `ROS_STATIC_PEERS=192.168.1.102`, `ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET`, and `ROS_LOCALHOST_ONLY` unset.
+- `./robot/robot_demo.sh stop` stops it.
+- Override with `VENV` (default `~/venvs/yolo`), `WS`, `ROBOT_IP`, `DOMAIN` and `TARGET_FRAME` (default `base_footprint`).
+
+By hand, in every terminal after the usual sourcing:
 
 ```bash
 export ROS_DOMAIN_ID=42

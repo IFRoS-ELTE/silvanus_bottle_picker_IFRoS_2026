@@ -1,11 +1,16 @@
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import PointCloud2
+from rclpy.qos import qos_profile_sensor_data
+from rclpy.time import Time
+from sensor_msgs.msg import CameraInfo, PointCloud2
+from vision_msgs.msg import Detection2DArray
 import sensor_msgs_py.point_cloud2 as pc2
 import numpy as np
 import zmq
 
 SERVER_TIMEOUT_MS = 30000
+# A detection older than this relative to the point cloud is not used for cropping
+DETECTION_MAX_AGE_S = 1.0
 
 class GraspInferenceClient(Node):
     def __init__(self):
@@ -23,7 +28,23 @@ class GraspInferenceClient(Node):
             self.pointcloud_callback,
             10
         )
-        self.latest_bbox = [150, 200, 350, 450] # Placeholder YOLO bounding box
+
+        # 3. Subscribe to the YOLO bounding boxes from bottle_perception
+        self.create_subscription(
+            Detection2DArray,
+            '/bottles/detections',
+            self.detections_callback,
+            10
+        )
+        # The boxes are in color image pixels, so the color resolution is needed to map them onto the cloud
+        self.create_subscription(
+            CameraInfo,
+            '/camera/color/camera_info',
+            self.camera_info_callback,
+            qos_profile_sensor_data
+        )
+        self.latest_detections = None
+        self.color_size = None # (width, height) of the color image
         self.is_predicting = False
 
     def connect_to_server(self):
@@ -32,13 +53,53 @@ class GraspInferenceClient(Node):
         self.zmq_socket.setsockopt(zmq.LINGER, 0)
         self.zmq_socket.connect("tcp://localhost:5555")
 
+    def detections_callback(self, msg: Detection2DArray):
+        self.latest_detections = msg
+
+    def camera_info_callback(self, msg: CameraInfo):
+        self.color_size = (msg.width, msg.height)
+
+    def get_bottle_bbox(self, cloud_msg: PointCloud2):
+        """Return the best bottle box as (xmin, ymin, xmax, ymax) in cloud pixels, or None."""
+        if self.latest_detections is None or self.color_size is None:
+            self.get_logger().warn('Waiting for /bottles/detections and /camera/color/camera_info...',
+                                   throttle_duration_sec=2.0)
+            return None
+
+        age = Time.from_msg(cloud_msg.header.stamp) - Time.from_msg(self.latest_detections.header.stamp)
+        if abs(age.nanoseconds) > DETECTION_MAX_AGE_S * 1e9:
+            self.get_logger().warn('Latest bottle detection is too old for this point cloud.',
+                                   throttle_duration_sec=2.0)
+            return None
+
+        detections = [d for d in self.latest_detections.detections if d.results]
+        if not detections:
+            self.get_logger().warn('No bottle detected.', throttle_duration_sec=2.0)
+            return None
+        best = max(detections, key=lambda d: d.results[0].hypothesis.score)
+
+        # Scale from color pixels to cloud pixels in case the two resolutions differ
+        sx = cloud_msg.width / self.color_size[0]
+        sy = cloud_msg.height / self.color_size[1]
+        u, v = best.bbox.center.position.x, best.bbox.center.position.y
+        hw, hh = best.bbox.size_x / 2.0, best.bbox.size_y / 2.0
+        xmin = int(max(0, (u - hw) * sx))
+        xmax = int(min(cloud_msg.width, (u + hw) * sx + 1))
+        ymin = int(max(0, (v - hh) * sy))
+        ymax = int(min(cloud_msg.height, (v + hh) * sy + 1))
+        return xmin, ymin, xmax, ymax
+
     def pointcloud_callback(self, msg: PointCloud2):
         # 1. Print this exactly ONCE so we know the topic connection is working
         self.get_logger().info('Point cloud received from simulation!', once=True)
 
         if self.is_predicting:
             return # Don't pile up requests while waiting for the GPU
-            
+
+        bbox = self.get_bottle_bbox(msg)
+        if bbox is None:
+            return
+
         self.is_predicting = True
         
         # read_points() returns a structured array on Jazzy, which cannot be reshaped to (H, W, 3)
@@ -52,8 +113,8 @@ class GraspInferenceClient(Node):
             self.is_predicting = False
             return
         
-        # 3. Use a smaller dummy bounding box just in case the sim camera is low resolution
-        xmin, ymin, xmax, ymax = 50, 50, 150, 150 
+        # 3. Crop the cloud to the detected bottle
+        xmin, ymin, xmax, ymax = bbox
         cropped_3d_region = points_3d[ymin:ymax, xmin:xmax, :]
         
         flattened_crop = cropped_3d_region.reshape(-1, 3)

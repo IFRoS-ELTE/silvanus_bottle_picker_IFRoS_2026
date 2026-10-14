@@ -106,3 +106,201 @@ In parallel with optimizing the detection posture, we are actively working on in
 
 ![Optimal Robot Position for Detection](images/bottle_detector_pos.png)
 *Caption: The selected robotic posture optimized for bottle detection within the simulation.*
+
+---
+
+## 🤖 Grasp Pipeline (`grasp-pipeline` branch)
+
+This module turns a bottle detection into a 6-DoF grasp pose for the xArm6. YOLO finds the bottle in the color image. The `grasp_pipeline` node crops the depth point cloud to that bounding box. A Contact-GraspNet server then predicts the best grasp on the cropped points.
+
+### How it works
+
+```
+Gazebo / D435 ──/camera/color/image_raw──▶ bottle_detector (YOLO)
+      │                                          │
+      │                                 /bottles/detections
+      │                                          ▼
+      ├──/camera/depth/points───────▶ grasp_inference (ROS 2 node)
+      └──/camera/color/camera_info──▶   crop cloud to best bbox
+                                                 │  ZeroMQ, tcp://127.0.0.1:5555
+                                                 ▼
+                                   grasp_server.py (conda env, GPU)
+                                   Contact-GraspNet → best 4x4 grasp
+```
+
+Contact-GraspNet needs its own Python/PyTorch/CUDA stack, which clashes with ROS 2 Jazzy's Python. It therefore runs as a separate process in a conda env, and the ROS node talks to it over ZeroMQ:
+
+- **Request:** the cropped cloud as raw `float32` bytes, shape `N x 3`, in the frame of `/camera/depth/points`.
+- **Reply:** the highest-scoring grasp as a 4x4 `float32` homogeneous transform in that same camera frame, or an empty message if no grasp was found.
+
+### Repository layout
+
+| Path | What it is |
+| --- | --- |
+| `src/grasp_pipeline/` | ROS 2 client node `grasp_inference` (crops the cloud, calls the server) |
+| `src/bottle_perception/` | `bottle_detector` (YOLO 2D boxes) and `bottle_localizer` (3D bottle positions) |
+| `grasp_server/contact_graspnet_pytorch/grasp_server.py` | Inference server for the PyTorch port (**the one in use**) |
+| `grasp_server/contact_graspnet_tf/grasp_server.py` | Inference server for the original NVlabs TensorFlow version (legacy) |
+| `sim/spawn_bottles.sh` | Spawns three test bottles (two standing, one lying) in front of the robot |
+| `sim/observation_pose.sh` | Moves the arm to the camera "observation" pose used for detection |
+| `sim/models/bottle/` | Gazebo bottle model |
+
+### ROS interface — `grasp_inference`
+
+| Direction | Topic | Type |
+| --- | --- | --- |
+| Subscribes | `/camera/depth/points` | `sensor_msgs/PointCloud2` (must be **organized**, i.e. `height > 1`) |
+| Subscribes | `/bottles/detections` | `vision_msgs/Detection2DArray` |
+| Subscribes | `/camera/color/camera_info` | `sensor_msgs/CameraInfo` (used to scale boxes from color to cloud pixels) |
+
+Behaviour:
+- Uses the highest-confidence detection. A detection is used only if its timestamp is within 1 s of the point cloud's.
+- Skips the request if fewer than 100 valid points fall inside the box.
+- Only one request is in flight at a time. If the server doesn't reply within 30 s, the node recreates the socket and tries again on the next cloud.
+- The resulting grasp pose is currently **only logged**; publishing it to TF / MoveIt is still TODO.
+
+### Prerequisites
+
+- Ubuntu 24.04, **ROS 2 Jazzy**, Gazebo Harmonic
+- [`scout_xarm_ros2`](https://github.com/IFRoS-ELTE/scout_xarm_ros2), built and sourced (simulation, robot description, `scout_xarm_teleop`)
+- An NVIDIA GPU with CUDA and conda/miniconda. One forward pass fits in 8 GB of VRAM.
+- ROS packages: `ros-jazzy-vision-msgs`, `ros-jazzy-cv-bridge`, `ros-jazzy-tf2-ros`, `ros-jazzy-tf2-geometry-msgs`, `ros-jazzy-sensor-msgs-py`, `python3-zmq`
+
+### 1. One-time setup
+
+**a) Contact-GraspNet server (conda env)**
+
+```bash
+git clone https://github.com/elchun/contact_graspnet_pytorch.git ~/contact_graspnet_pytorch
+cd ~/contact_graspnet_pytorch
+conda env create -f contact_graspnet_env.yml -n cgn_torch
+conda activate cgn_torch
+pip install -e . pyzmq
+
+# The server loads the model relative to its own location, so it must live in the repo root
+cp ~/workspaces/silvanus_bottle_picker_IFRoS_2026/grasp_server/contact_graspnet_pytorch/grasp_server.py .
+```
+
+The pretrained weights ship with the upstream repo. The server expects them at `checkpoints/contact_graspnet/checkpoints/model.pt` and exits with an error if they are missing.
+
+**b) ROS workspace**
+
+```bash
+cd ~/workspaces/silvanus_bottle_picker_IFRoS_2026
+source /opt/ros/jazzy/setup.bash
+source ~/workspaces/scout_xarm_ros2/install/setup.bash
+rosdep install --from-paths src --ignore-src -y --rosdistro jazzy
+```
+
+`bottle_detector` needs `ultralytics`, which is not available through rosdep. Install it in a venv that can still see the ROS Python packages. Keep `numpy<2`, because Jazzy's `cv_bridge` is built against NumPy 1.x.
+
+```bash
+python3 -m venv --system-site-packages ~/silvanus_venv
+source ~/silvanus_venv/bin/activate
+pip install -r requirements.txt
+
+colcon build --symlink-install --packages-select bottle_perception grasp_pipeline
+```
+
+The node entry points start with `#!/usr/bin/env python3`, so activate the venv in any terminal that runs `bottle_detector`. Otherwise it can't import `ultralytics`.
+
+The YOLO weights (`yolo11n.pt`) are downloaded automatically on first run.
+
+### 2. Running in simulation
+
+Use `ROS_DOMAIN_ID=0` for the simulation in every ROS terminal. (The real robot uses domain 42.)
+
+**Terminal 1: Gazebo**
+```bash
+source ~/workspaces/scout_xarm_ros2/install/setup.bash
+export ROS_DOMAIN_ID=0
+ros2 launch scout_xarm_gazebo sim.launch.py world:=weston_robot_empty.world
+```
+
+**Terminal 2: bottles + arm observation pose**
+```bash
+source ~/workspaces/scout_xarm_ros2/install/setup.bash
+export ROS_DOMAIN_ID=0
+cd ~/workspaces/silvanus_bottle_picker_IFRoS_2026
+./sim/spawn_bottles.sh            # pass a world name (without .world) if you launched a different one
+./sim/observation_pose.sh
+```
+
+**Terminal 3: grasp server (conda, not ROS)**
+```bash
+conda activate cgn_torch
+cd ~/contact_graspnet_pytorch
+python grasp_server.py
+# wait for: "Server ready on 5555"
+```
+
+**Terminal 4: bottle detector**
+```bash
+source ~/silvanus_venv/bin/activate
+cd ~/workspaces/silvanus_bottle_picker_IFRoS_2026
+source install/setup.bash
+export ROS_DOMAIN_ID=0
+ros2 launch bottle_perception detector.launch.py
+```
+
+**Terminal 5: grasp client**
+```bash
+cd ~/workspaces/silvanus_bottle_picker_IFRoS_2026
+source install/setup.bash
+export ROS_DOMAIN_ID=0
+ros2 run grasp_pipeline grasp_inference
+```
+
+When it works, the client logs `Received Grasp Pose:` followed by a 4x4 matrix. The server logs `Success. <n> grasps, best score: ...`.
+
+Optional checks:
+```bash
+ros2 run rqt_image_view rqt_image_view /bottles/image_annotated   # YOLO boxes
+ros2 run bottle_perception bottle_localizer                        # 3D bottle positions + RViz markers
+```
+
+### 3. Testing the server on its own
+
+With the server running, send it a random cloud from the `cgn_torch` env. The command prints `64` if a grasp came back (16 floats × 4 bytes) and `0` if none did:
+
+```bash
+python -c "
+import zmq, numpy as np
+s = zmq.Context().socket(zmq.REQ)
+s.setsockopt(zmq.RCVTIMEO, 60000)
+s.connect('tcp://127.0.0.1:5555')
+s.send(np.random.rand(2000, 3).astype(np.float32).tobytes())
+print(len(s.recv()))
+"
+```
+
+### Real D435 camera (not yet tested end-to-end)
+
+Start the driver with aligned depth and an organized point cloud, then remap the client's topics to the driver's names:
+
+```bash
+ros2 launch realsense2_camera rs_launch.py align_depth.enable:=true pointcloud.enable:=true pointcloud.ordered_pc:=true
+ros2 run grasp_pipeline grasp_inference --ros-args \
+  -r /camera/depth/points:=/camera/camera/depth/color/points \
+  -r /camera/color/camera_info:=/camera/camera/color/camera_info
+```
+
+Run the detector with `use_sim_time:=false` and the matching `image_topic`.
+
+### Troubleshooting
+
+| Symptom | Cause / fix |
+| --- | --- |
+| `No reply from Contact-GraspNet server within 30 s` | The server isn't running or is stuck. Check `ss -tlnp \| grep 5555` and the server terminal. |
+| `Waiting for /bottles/detections and /camera/color/camera_info...` | The detector isn't running, or `ROS_DOMAIN_ID` differs between terminals. |
+| `Latest bottle detection is too old for this point cloud` | The detector is slow or stopped. Check whether YOLO is running on the CPU (`device` parameter). |
+| `point cloud is unorganized` | The camera publishes a flat cloud (`height == 1`). The 2D box crop needs an organized cloud. |
+| `Not enough valid depth points in bounding box` | The bottle is too far away, too small, or outside the depth range. Move the arm or the bottle closer. |
+| CUDA out-of-memory on the server | Close other GPU users. `forward_passes` is already 1. |
+| `ImportError` / NumPy errors from `cv_bridge` | NumPy 2 is installed in the venv. Reinstall with `pip install "numpy<2"`. |
+
+### TODO
+- [ ] Publish the grasp pose (TF + `PoseStamped`) in the robot's frame.
+- [ ] Hand the grasp to MoveIt for the xArm6 pick.
+- [ ] Filter grasps against the gripper's reachable workspace and approach direction.
+- [ ] Validate on the real D435 and robot.

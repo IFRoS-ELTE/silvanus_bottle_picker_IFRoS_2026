@@ -348,10 +348,62 @@ The robot's bringup (`silvanus-up.sh`, ROS domain **42**) publishes the D435 und
 
 The nodes' defaults are the sim's topic names, so on the robot they need the topic parameters below. (`bottle_localizer` would also cope with the raw, unaligned depth, using its `camera_info` and the depth→color TF.)
 
-**Quick start:** `ROBOT=1 ./sim/grasp_demo.sh` (the `robot-demo` alias) opens the same kind of tabs as the sim demo, but for the robot: `detector`, `localizer`, `grasp` and `image` (YOLO boxes).
-- **Environment:** every tab gets the same environment as the sim demo, plus `ROS_DOMAIN_ID=42`, `ROS_STATIC_PEERS=192.168.1.102` (`ROBOT_IP`), `ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET`, and `ROS_LOCALHOST_ONLY` unset.
+#### Robot demo (`robot-demo`)
+
+`ROBOT=1 ./sim/grasp_demo.sh` opens the same kind of tabs as the sim demo, but for the robot: `detector`, `localizer`, `grasp` and `image` (YOLO boxes). `robot-demo` is a shell alias for it. The nodes run on your laptop and talk to the robot's camera over its Wi-Fi.
+
+**First time only, on the laptop, while it still has internet** (the robot's Wi-Fi has none):
+
+1. Do the [one-time setup](#1-one-time-setup) above, except a) (Contact-GraspNet isn't used on the robot). The script refuses to start unless both workspaces are built, even in robot mode:
+   - `~/workspaces/scout_xarm_ros2` built (`install/setup.bash` exists), or set `SIM_WS`;
+   - this workspace built with `colcon build` (no `--symlink-install`);
+   - the venv at `~/silvanus_venv` with `requirements.txt` installed, or set `VENV`.
+2. Install the extra laptop packages: `rqt_image_view` for the `image` tab, and `gnome-terminal`, which the script opens its tabs in.
+   ```bash
+   sudo apt install ros-jazzy-rqt-image-view gnome-terminal
+   ```
+3. Download the YOLO weights into the repo root, where the `detector` tab looks for them. Also draw one result, which makes Ultralytics download the font it draws the boxes with. Without internet neither download can happen later.
+   ```bash
+   conda deactivate 2>/dev/null; source ~/silvanus_venv/bin/activate
+   cd ~/workspaces/silvanus_bottle_picker_IFRoS_2026
+   python3 -c "from ultralytics import YOLO; import numpy as np; YOLO('yolo11n.pt').predict(np.zeros((64, 64, 3), 'uint8'), verbose=False)[0].plot()"
+   ls yolo11n.pt
+   ```
+4. Create the aliases. Add them to `~/.bashrc`, then open a new terminal (or `source ~/.bashrc`):
+   ```bash
+   alias robot-demo='ROBOT=1 ~/workspaces/silvanus_bottle_picker_IFRoS_2026/sim/grasp_demo.sh'
+   alias robot-demo-stop='~/workspaces/silvanus_bottle_picker_IFRoS_2026/sim/grasp_demo.sh stop'
+   ```
+   Check them with `type robot-demo`.
+
+**Every time:**
+
+1. **Start the robot's stack.** On the robot (its own screen, or `ssh agilex@192.168.1.102`), see `silvanus_robot/STUDENT_GUIDE.md`:
+   ```bash
+   cd /opt/silvanus
+   ./silvanus-up.sh --no-base                      # camera + lidar, chassis can't move
+   ./silvanus-up.sh --no-base --arm=<control-box-ip>  # also the arm: needed for correct positions, see below
+   ```
+   The D435 is mounted on the arm. Without `--arm`, nothing publishes the arm's real joint angles: the bringup fills them with zeros, so TF places the camera where it would be with the arm at zero. Positions in `base_footprint` are then only right if the arm really is in that pose.
+2. **Connect the laptop to the robot's Wi-Fi** and check the robot's address. It comes from DHCP and can change (`hostname -I` on the robot):
+   ```bash
+   ping -c 3 192.168.1.102
+   ```
+3. **Run the demo** from a gnome-terminal window. The tabs open in that window:
+   ```bash
+   robot-demo                            # robot at 192.168.1.102
+   ROBOT_IP=192.168.1.105 robot-demo     # robot at another address
+   ```
+4. **Check it works:**
+   - `detector` logs `... FPS | botellas: N`. Around 0 FPS means the images aren't getting across the Wi-Fi.
+   - `image` shows the YOLO boxes.
+   - `localizer` logs `bottle 0: x=... y=... z=... m in "base_footprint"`.
+5. **Stop** with `robot-demo-stop` (it stops the laptop-side nodes only; the robot's stack keeps running).
+
+What the tabs get:
+- **Environment:** the same as the sim demo, plus `ROS_DOMAIN_ID=42`, `ROS_STATIC_PEERS=192.168.1.102` (`ROBOT_IP`), `ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET`, and `ROS_LOCALHOST_ONLY` unset.
 - **Not started:** `sim`, `setup`, `moveit` and `pick`. The robot's own bringup runs the camera, arm and MoveIt, and `pick_bottle` is for the simulated gripper.
-- **Stop:** `./sim/grasp_demo.sh stop`.
+- Each tab stays open as a shell after its command exits: press Up + Enter to run it again.
 
 By hand, in every terminal after the usual sourcing:
 

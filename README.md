@@ -185,7 +185,7 @@ Contact-GraspNet grasps use its own convention: z is the approach direction, x i
 What it does with each cloud:
 - **Detection:** uses the highest-confidence box, and only if its timestamp is within 1 s of the cloud's.
 - **Crop:** keeps only points within `crop_radius` (0.10 m) of the bottle centre. The 2D box alone also includes the robot's own gripper and bumper, and Contact-GraspNet grasps those instead.
-- **Shape estimate:** assumes the bottle is standing (vertical axis) if its points reach above `lying_max_height` (0.12 m), and lying (horizontal axis) otherwise. It needs TF from the camera to `ground_frame` (`base_footprint`, whose z = 0 is the ground). The diameter comes out too large with the sim's noisy depth camera, so `pick_bottle` doesn't use it.
+- **Shape estimate:** first finds the surface the bottle rests on (floor or table top): the lowest height where the cropped points pile up. It assumes the bottle is standing (vertical axis) if its points reach more than `lying_max_height` (0.12 m) above that surface, and lying (horizontal axis) otherwise. It needs TF from the camera to `ground_frame` (`base_footprint`, z up). The diameter comes out too large with the sim's noisy depth camera, so `pick_bottle` doesn't use it. `pick_bottle` takes the surface height from it, puts the bottle on it, and adds a 30 cm square of it to MoveIt's world when it isn't the floor.
 - **Contact-GraspNet** (`use_graspnet`, default `true` in the node, `false` in `grasp-demo`): sends the crop to the server, and moves each returned grasp so the fingers are centred on the points between them (`refine_grasp`).
 - **Point cloud axes:** `cloud_axes` (default `gazebo`) handles Gazebo's point cloud, which uses camera-link axes even though it is labelled with the optical frame. Use `cloud_axes:=optical` with a real RealSense.
 - **Server timeout:** only one request is in flight at a time. If the server doesn't reply within 30 s, the node recreates the socket and tries again on the next cloud.
@@ -206,7 +206,7 @@ What it does with each cloud:
 4. **Moves straight in, then closes with a squeeze.** In the sim the fingers only press while their trajectory is still moving, so it keeps closing slowly. If the fingers close (nearly) all the way, nothing is between them: it opens, backs straight out and fails the attempt.
 5. **Lifts** `lift_height` (0.15 m) straight up, or back along the approach if straight up isn't possible. It sends this directly to the arm controller without the strict goal check, because the arm sags under the load. If the squeezing fingers keep creeping shut afterwards, the bottle slipped out.
 
-If an attempt fails, it opens the gripper, returns to the view pose and starts again, up to `max_attempts` (3) times. It publishes the gripper target it is moving to on `/grasp/tcp_target`.
+If an attempt fails, it opens the gripper, returns to the view pose and starts again, up to `max_attempts` (30) times. It publishes the gripper target it is moving to on `/grasp/tcp_target`.
 
 **`moveit_sim.launch.py`** starts MoveIt's `move_group` with the sim's own robot model (Scout base, mount, xArm6, gripper, camera), so plans avoid the rover body. It plans for the `xarm6` group up to `link_tcp` and sends trajectories to the sim's existing `xarm6_traj_controller`. It starts no controllers of its own. Add `rviz:=true` for RViz with the MoveIt plugin.
 
@@ -398,11 +398,37 @@ The nodes' defaults are the sim's topic names, so on the robot they need the top
    - `detector` logs `... FPS | botellas: N`. Around 0 FPS means the images aren't getting across the Wi-Fi.
    - `image` shows the YOLO boxes.
    - `localizer` logs `bottle 0: x=... y=... z=... m in "base_footprint"`.
+   - `grasp` stays quiet while it works (it only warns). Its bottle estimate is on `/grasp/bottle`.
 5. **Stop** with `robot-demo-stop` (it stops the laptop-side nodes only; the robot's stack keeps running).
+
+**Grasping with the real arm (`PICK=1 robot-demo`):** this adds a `pick` tab that runs `pick_bottle` on the robot's own MoveIt and AG-95. It needs `silvanus-up.sh --arm=<control-box-ip>` with the gripper enabled (no `--no-gripper`).
+1. Move the arm so the camera sees the bottle, and check `detector` and `localizer` report it.
+2. Clear the area and keep the emergency stop in reach. `Ctrl-C` is not an emergency stop.
+3. In the `pick` tab, press Enter. The tab waits for that before anything moves.
+
+What it does differently from the sim:
+- **No view pose** (`use_view_pose:=false`): the arm doesn't move until the bottle is located. It grasps from wherever it is as soon as `bottle_samples` positions have arrived. After a failed attempt it stays where the failure left it (e.g. backed out to the pre-grasp), so the camera must still see the bottle from there for the next attempt; otherwise the node keeps waiting for the bottle.
+- **Gripper point:** the robot has no `link_tcp`. MoveIt moves `link_eef`, with the point between the fingertips at `tcp_offset` = 0.19 m along its z (the URDF's `grasp_link`), not rotated: the real AG-95 closes along `link_eef`'s y, as `link_tcp` does in the sim.
+  - The robot's URDF has the AG-95 mounted 90° from the real one (`AG95_MOUNT_RPY` defaults to `0 0 0` in `silvanus-up.sh`), so in RViz and in MoveIt's collision checks its fingers close along x. The grasp orientation doesn't depend on that model, but the collision checks do. Starting the robot with the measured mount, e.g. `AG95_MOUNT_RPY="0 0 1.5708" ./silvanus-up.sh ...`, fixes the model; `tcp_offset` stays the same, as it is relative to `link_eef`.
+  - The pad centres are at about 0.17 m. If the fingers close in front of the bottle or only catch it with their tips, change the 0.19 in `sim/grasp_demo.sh`.
+- **Gripper:** `GripperCommand` on `/dh_ag95_gripper_controller/gripper_cmd`, joint `left_outer_knuckle_joint` (0 open, 0.93 closed). The AG-95 keeps pressing by itself, so there is no sim-style squeeze. "Closed on nothing" and the slip check (`slip_tolerance:=0.02`) work from the finger position as in the sim.
+- **Speed:** `velocity_scaling:=0.1`, a third of the sim's.
+- **Grasp directions:** a standing bottle is approached only horizontally from the front: straight away from the arm's base (yaw 0), then 15° and 30° either side (`body_yaws:='[0.0, 15.0, -15.0, 30.0, -30.0]'`, `body_tilts:='[0.0]'`). Never from the sides or behind, which the arm can't reach anyway. A lying bottle only straight down (`lying_tilts:='[0.0]'`). For yaw 0 only, change `body_yaws` to `'[0.0]'` in `sim/grasp_demo.sh`.
+- **Drop in the box:** after the lift it carries the bottle to the pose over the box on the robot's back and opens the gripper there: `drop_joints_deg:='[-185.0, -37.0, -53.0, 1.0, 85.0, 1.0]'` (joint1..joint6 in degrees; empty, the sim's default, = no drop). While it carries the bottle, the bottle is attached to the gripper in MoveIt's model, so the path keeps it clear of the robot's body. The box itself isn't in the robot's URDF, so MoveIt doesn't avoid it: watch the first runs. If the move to the drop pose fails, it doesn't retry: it logs `Could not drop the bottle` and keeps holding it.
+- **Home pose:** `home_joints_deg:='[-6.5, -37.2, -52.8, 0.9, 54.1, 1.5]'` (joint1..joint6 in degrees; empty, the sim's default, = no home pose). The arm moves there at the start, at the beginning of every retry after a failed attempt, after it gives up, and after the drop. With no view pose it looks for the bottle from there, so the camera must see the bottle from the home pose.
+- **Keeps picking:** after dropping a bottle and going home it waits for the next one and picks it too, until you stop it with Ctrl-C (`continuous`, default true; only with `drop_joints_deg` set). It stops on its own if `max_attempts` attempts in a row fail on the same bottle.
+- **MoveIt planning:** `planning_attempts` (default 30) plans per motion request, run in parallel within `planning_time` (5 s); the shortest valid one is used. These only affect planning to the pre-grasp and back. A grasp rejected by the IK check ("0 reachable pose(s)") never reaches the planner.
+- **IK time:** `ik_timeout:=0.2` s per candidate pose (sim: 0.05). Near the edge of the reach MoveIt's IK needs longer to find a solution.
+- **All candidates checked and logged** (`check_all_candidates:=true`; the sim stops after `max_candidates` reachable ones). Each attempt logs one line per candidate: its status, approach `yaw` (0 = straight away from the arm's base) and `tilt` (below horizontal), the fingertip point, the pre-grasp, and the wrist (`link_eef`) with its distance from `link_base`. Checking all 45 standing-bottle candidates can take up to about a minute.
+- **Bottle radius:** still the parameter `bottle_radius` (3.5 cm). For a thinner bottle add e.g. `-p bottle_radius:=0.025` to the pick command.
+
+**Seeing why a grasp is rejected:** every attempt publishes the bottle it planned around (blue cylinder) and each body-grasp candidate on `/grasp/body_candidates` (RViz: *Add → By topic → MarkerArray*, fixed frame `base_footprint`). Each arrow runs from the pre-grasp to the point between the fingertips: green reachable, yellow pre-grasp unreachable, orange in collision, red out of reach, grey not checked. The label above the bottle gives its horizontal distance from `link_base`. The robot's IK finds most grasps for a standing bottle about 0.45–0.55 m from `link_base` (x ≈ 0.65–0.75 in `base_footprint`), and none beyond about 0.65 m. To check the bottle estimate against the real bottle, add a *DepthCloud* display on `/camera/camera/aligned_depth_to_color/image_raw`.
+
+Not yet tested on the robot: the first runs should be watched closely, with the arm slowed down further if needed.
 
 What the tabs get:
 - **Environment:** the same as the sim demo, plus `ROS_DOMAIN_ID=42`, `ROS_STATIC_PEERS=192.168.1.102` (`ROBOT_IP`), `ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET`, and `ROS_LOCALHOST_ONLY` unset.
-- **Not started:** `sim`, `setup`, `moveit` and `pick`. The robot's own bringup runs the camera, arm and MoveIt, and `pick_bottle` is for the simulated gripper.
+- **Not started:** `sim`, `setup` and `moveit` (the robot's own bringup runs the camera, arm and MoveIt), and `pick` unless `PICK=1`.
 - Each tab stays open as a shell after its command exits: press Up + Enter to run it again.
 
 By hand, in every terminal after the usual sourcing:
@@ -428,7 +454,8 @@ ros2 run rqt_image_view rqt_image_view /bottles/image_annotated
     -p depth_topic:=/camera/camera/aligned_depth_to_color/image_raw \
     -r /camera/color/camera_info:=/camera/camera/color/camera_info
   ```
-- **Don't run `moveit_sim.launch.py` or `pick_bottle` against the robot:** they are for the simulated arm and xArm gripper. The real robot has the AG-95 gripper and its own MoveIt (`silvanus_robot/scout_xarm_moveit_config`). `pick_bottle` would sit waiting for the sim's gripper controller before moving, but don't rely on that.
+- **Don't run `moveit_sim.launch.py` against the robot:** it would start a second `move_group` next to the robot's own (`silvanus_robot/scout_xarm_moveit_config`).
+- **`pick_bottle` on the robot** needs the robot parameters from `sim/grasp_demo.sh` (see [Grasping with the real arm](#robot-demo-robot-demo)). With its sim defaults it waits for the sim's gripper controller and never moves.
 
 ### Troubleshooting
 

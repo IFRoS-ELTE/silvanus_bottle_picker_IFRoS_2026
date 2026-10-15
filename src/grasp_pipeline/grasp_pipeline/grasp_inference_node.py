@@ -60,12 +60,14 @@ class GraspInferenceClient(Node):
         self.min_period = 1.0 / max(float(self.get_parameter('max_rate').value), 1e-3)
         self.last_processed = 0.0
         self.depth_K = None
-        # Frame whose z = 0 is the ground; the bottle axis is estimated and published in it
+        # Frame whose z axis points up; the bottle axis is estimated and published in it. The
+        # bottle may rest on the ground or on a table: heights are measured from the surface
+        # found under it (see support_height)
         self.declare_parameter('ground_frame', 'base_footprint')
-        self.declare_parameter('ground_clearance', 0.01)  # points lower than this are ground
+        self.declare_parameter('ground_clearance', 0.01)  # points this close to it are surface
         self.ground_frame = self.get_parameter('ground_frame').value
         self.ground_clearance = float(self.get_parameter('ground_clearance').value)
-        # Points reaching higher than this: standing bottle (vertical axis), else lying
+        # Points reaching higher than this above the surface: standing bottle, else lying
         self.declare_parameter('lying_max_height', 0.12)
         self.lying_max_height = float(self.get_parameter('lying_max_height').value)
         self.tf_buffer = tf2_ros.Buffer()
@@ -263,12 +265,32 @@ class GraspInferenceClient(Node):
         return G
 
     @staticmethod
+    def support_height(z, bin_size=0.01, min_fraction=0.05):
+        """Height of the surface the bottle rests on, from the cropped points' heights.
+
+        The crop around the bottle also holds the surface around it (floor or table top), a
+        plane that piles its points into one height bin, while the bottle's camera-facing side
+        spreads over many. So the lowest bin holding at least `min_fraction` of the points is
+        taken as the surface; sparse lower points (the floor past a table's edge, noise) are
+        ignored. With no such bin, the lowest few percent of the points.
+        """
+        lo, hi = np.percentile(z, [0.5, 99.5])
+        if hi - lo < bin_size:
+            return float(lo)
+        counts, edges = np.histogram(z, bins=np.arange(lo, hi + bin_size, bin_size))
+        dense = np.nonzero(counts >= min_fraction * len(z))[0]
+        if len(dense) == 0:
+            return float(np.percentile(z, 2))
+        return float((edges[dense[0]] + edges[dense[0] + 1]) / 2.0)
+
+    @staticmethod
     def estimate_bottle(points, camera, ground_clearance=0.01, lying_max_height=0.12):
         """(centre, unit axis, radius, length) of the bottle as a cylinder, or None.
 
-        `points` and `camera` (the camera position) are in a frame whose z = 0 is the ground.
-        A bottle on the ground is either standing or lying, so the axis is taken as vertical
-        if the points reach higher than `lying_max_height`, else as horizontal with its
+        `points` and `camera` (the camera position) are in a frame whose z axis points up.
+        The bottle rests on the ground or a table (see support_height), so it is either
+        standing or lying: the axis is taken as vertical if the points reach higher than
+        `lying_max_height` above that surface, else as horizontal with its
         direction from the points' spread in xy. A free 3D fit (PCA) is avoided because depth
         noise spreads the points along the camera rays, which a noisy sensor makes the
         biggest spread. Only the camera-facing half of the bottle is visible, and those points
@@ -276,12 +298,13 @@ class GraspInferenceClient(Node):
         Height and length only cover the cropped points (crop_radius), so a long bottle comes
         out shorter than it is.
         """
-        pts = points[points[:, 2] > ground_clearance].astype(np.float64)
+        support = GraspInferenceClient.support_height(points[:, 2])
+        pts = points[points[:, 2] > support + ground_clearance].astype(np.float64)
         if len(pts) < 50:
             return None
         mean = pts.mean(axis=0)
         top = np.percentile(pts[:, 2], 98)
-        standing = top > lying_max_height
+        standing = top - support > lying_max_height
         if standing:
             axis = np.array([0.0, 0.0, 1.0])
         else:
@@ -299,9 +322,9 @@ class GraspInferenceClient(Node):
         width = np.percentile((pts - mean) @ across, [10, 90])
         radius = (width[1] - width[0]) / (2.0 * 0.8)
         centre = mean + away * (np.pi / 4.0) * radius
-        if standing:  # from the ground up to the top
-            centre[2] = top / 2.0
-            length = top
+        if standing:  # from the surface up to the top
+            centre[2] = (support + top) / 2.0
+            length = top - support
         else:
             along = np.percentile((pts - centre) @ axis, [2, 98])
             centre = centre + axis * (along[0] + along[1]) / 2.0

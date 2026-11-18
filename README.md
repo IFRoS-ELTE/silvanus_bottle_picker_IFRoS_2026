@@ -406,16 +406,19 @@ The nodes' defaults are the sim's topic names, so on the robot they need the top
 2. Clear the area and keep the emergency stop in reach. `Ctrl-C` is not an emergency stop.
 3. In the `pick` tab, press Enter. The tab waits for that before anything moves.
 
+All the robot settings below are in `src/grasp_pipeline/config/pick_robot.yaml`, used by both the `pick` tab and the robot's Docker image. After editing it, `colcon build` (and rebuild the image).
+
 What it does differently from the sim:
 - **No view pose** (`use_view_pose:=false`): the arm doesn't move until the bottle is located. It grasps from wherever it is as soon as `bottle_samples` positions have arrived. After a failed attempt it stays where the failure left it (e.g. backed out to the pre-grasp), so the camera must still see the bottle from there for the next attempt; otherwise the node keeps waiting for the bottle.
 - **Gripper point:** the robot has no `link_tcp`. MoveIt moves `link_eef`, with the point between the fingertips at `tcp_offset` = 0.19 m along its z (the URDF's `grasp_link`), not rotated: the real AG-95 closes along `link_eef`'s y, as `link_tcp` does in the sim.
   - The robot's URDF has the AG-95 mounted 90° from the real one (`AG95_MOUNT_RPY` defaults to `0 0 0` in `silvanus-up.sh`), so in RViz and in MoveIt's collision checks its fingers close along x. The grasp orientation doesn't depend on that model, but the collision checks do. Starting the robot with the measured mount, e.g. `AG95_MOUNT_RPY="0 0 1.5708" ./silvanus-up.sh ...`, fixes the model; `tcp_offset` stays the same, as it is relative to `link_eef`.
-  - The pad centres are at about 0.17 m. If the fingers close in front of the bottle or only catch it with their tips, change the 0.19 in `sim/grasp_demo.sh`.
+  - The pad centres are at about 0.17 m. If the fingers close in front of the bottle or only catch it with their tips, change the 0.19 (`tcp_offset`) in `src/grasp_pipeline/config/pick_robot.yaml`.
 - **Gripper:** `GripperCommand` on `/dh_ag95_gripper_controller/gripper_cmd`, joint `left_outer_knuckle_joint` (0 open, 0.93 closed). The AG-95 keeps pressing by itself, so there is no sim-style squeeze. "Closed on nothing" and the slip check (`slip_tolerance:=0.02`) work from the finger position as in the sim.
 - **Speed:** `velocity_scaling:=0.1`, a third of the sim's.
-- **Grasp directions:** a standing bottle is approached only horizontally from the front: straight away from the arm's base (yaw 0), then 15° and 30° either side (`body_yaws:='[0.0, 15.0, -15.0, 30.0, -30.0]'`, `body_tilts:='[0.0]'`). Never from the sides or behind, which the arm can't reach anyway. A lying bottle only straight down (`lying_tilts:='[0.0]'`). For yaw 0 only, change `body_yaws` to `'[0.0]'` in `sim/grasp_demo.sh`.
+- **Grasp directions:** a standing bottle is approached only horizontally from the front: straight away from the arm's base (yaw 0), then 15° and 30° either side (`body_yaws:='[0.0, 15.0, -15.0, 30.0, -30.0]'`, `body_tilts:='[0.0]'`). Never from the sides or behind, which the arm can't reach anyway. A lying bottle only straight down (`lying_tilts:='[0.0]'`). For yaw 0 only, change `body_yaws` to `[0.0]` in `pick_robot.yaml`.
 - **Drop in the box:** after the lift it carries the bottle to the pose over the box on the robot's back and opens the gripper there: `drop_joints_deg:='[-185.0, -37.0, -53.0, 1.0, 85.0, 1.0]'` (joint1..joint6 in degrees; empty, the sim's default, = no drop). While it carries the bottle, the bottle is attached to the gripper in MoveIt's model, so the path keeps it clear of the robot's body. The box itself isn't in the robot's URDF, so MoveIt doesn't avoid it: watch the first runs. If the move to the drop pose fails, it doesn't retry: it logs `Could not drop the bottle` and keeps holding it.
-- **Home pose:** `home_joints_deg:='[-6.5, -37.2, -52.8, 0.9, 54.1, 1.5]'` (joint1..joint6 in degrees; empty, the sim's default, = no home pose). The arm moves there at the start, at the beginning of every retry after a failed attempt, after it gives up, and after the drop. With no view pose it looks for the bottle from there, so the camera must see the bottle from the home pose.
+- **Home pose:** `home_joints_deg:='[-6.0, -59.0, -25.0, 1.0, 28.0, -10.0]'` (joint1..joint6 in degrees; empty, the sim's default, = no home pose). The arm moves there at the start, at the beginning of every retry after a failed attempt, after it gives up, and after the drop. With no view pose it looks for the bottle from there, so the camera must see the bottle from the home pose.
+- **Waits for the bottle to stay put:** grasps are only generated once the bottle has stayed within 5 cm (`stable_radius`) for at least 3 s (`stable_time`, by the camera's timestamps), so a bottle still being put down or rolling isn't grasped. If it moves further, or isn't detected for more than 1 s (`stable_max_gap`), the 3 s start again; `pick_bottle`'s log says which. Only the positions from those 3 s are used to locate it. `stable_time: 0.0` turns the wait off. This also applies in the sim (default 3 s).
 - **Keeps picking:** after dropping a bottle and going home it waits for the next one and picks it too, until you stop it with Ctrl-C (`continuous`, default true; only with `drop_joints_deg` set). It stops on its own if `max_attempts` attempts in a row fail on the same bottle.
 - **MoveIt planning:** `planning_attempts` (default 30) plans per motion request, run in parallel within `planning_time` (5 s); the shortest valid one is used. These only affect planning to the pre-grasp and back. A grasp rejected by the IK check ("0 reachable pose(s)") never reaches the planner.
 - **IK time:** `ik_timeout:=0.2` s per candidate pose (sim: 0.05). Near the edge of the reach MoveIt's IK needs longer to find a solution.
@@ -455,7 +458,66 @@ ros2 run rqt_image_view rqt_image_view /bottles/image_annotated
     -r /camera/color/camera_info:=/camera/camera/color/camera_info
   ```
 - **Don't run `moveit_sim.launch.py` against the robot:** it would start a second `move_group` next to the robot's own (`silvanus_robot/scout_xarm_moveit_config`).
-- **`pick_bottle` on the robot** needs the robot parameters from `sim/grasp_demo.sh` (see [Grasping with the real arm](#robot-demo-robot-demo)). With its sim defaults it waits for the sim's gripper controller and never moves.
+- **`pick_bottle` on the robot** needs the robot parameters from `src/grasp_pipeline/config/pick_robot.yaml` (`--params-file`; see [Grasping with the real arm](#robot-demo-robot-demo)). With its sim defaults it waits for the sim's gripper controller and never moves.
+
+### Running on the robot (Docker)
+
+Instead of running the nodes on the laptop over Wi-Fi, they can run on the robot computer itself, in their own container beside the robot's `silvanus` container (see `silvanus_robot/STUDENT_GUIDE.md`). Camera images then never cross the Wi-Fi.
+
+The image (`Dockerfile`) is `ros:jazzy-ros-base`, the same base as the robot's, with `bottle_perception`, `grasp_pipeline`, CPU-only PyTorch, Ultralytics and `yolo11n.pt` baked in: the robot has no internet. It contains:
+
+| Command | Runs |
+|---|---|
+| `ros2 launch grasp_pipeline robot.launch.py` | `bottle_detector`, `bottle_localizer` and `grasp_inference` with the robot's topics (`/camera/camera/...`); the same settings as the `robot-demo` tabs. Arguments: `device:=0` (YOLO on a GPU), `confidence:=`, `camera:=` |
+| `pick-bottle` | `pick_bottle` with `pick_robot.yaml`, after you press Enter. Extra arguments go to `--ros-args`, e.g. `pick-bottle -p velocity_scaling:=0.05` |
+
+**1. Build and copy (laptop, with internet):**
+
+```bash
+TAG=v1 ./docker/build.sh                    # builds bottle_picker:v1, saves docker/out/bottle_picker-v1.tar.gz
+# connect to the robot's Wi-Fi
+./docker/deploy.sh                          # copies it to agilex@192.168.1.102 and docker-loads it
+ROBOT_IP=192.168.1.105 ./docker/deploy.sh   # if the robot has another address (hostname -I on it)
+```
+
+`deploy.sh` asks for the robot's password (ssh, then sudo). It also tags the image `bottle_picker:latest` on the robot. Rebuild and redeploy after any change to the code, `pick_robot.yaml` or the dependencies.
+
+**2. Start the robot's stack** on the robot's own screen, in the foreground, as in [Robot demo](#robot-demo-robot-demo): `cd /opt/silvanus && ./silvanus-up.sh --no-base` for perception only, `--arm=<control-box-ip>` too for picking.
+
+**3. Start perception** (a second terminal on the robot, or `ssh agilex@192.168.1.102`):
+
+```bash
+cd /opt/silvanus
+./student-run.sh --name=bottle bottle_picker:latest ros2 launch grasp_pipeline robot.launch.py
+```
+
+The detector's log shows its FPS. YOLO runs on the robot's CPU; if it is too slow, `ros2 launch ... robot.launch.py device:=0` needs a GPU passed to the container, which `student-run.sh` does not do.
+
+**4. Pick** (another terminal on the robot), with the arm looking at the bottle and the emergency stop in reach:
+
+```bash
+cd /opt/silvanus
+./student-run.sh --name=bottle-pick bottle_picker:latest pick-bottle
+```
+
+**5. Watch from the laptop:** `ROS_DOMAIN_ID=42 ROS_STATIC_PEERS=192.168.1.102 ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET ros2 run rqt_image_view rqt_image_view /bottles/image_annotated` (unset `ROS_LOCALHOST_ONLY`), or RViz as in `silvanus_robot/REMOTE_RVIZ.md`.
+
+**Stop:** `Ctrl-C` in each terminal, or `sudo docker stop student-bottle student-bottle-pick`. Neither is an emergency stop.
+
+Do not run `robot-demo` on the laptop at the same time: there would be two detectors, localizers and `pick_bottle`s on domain 42.
+
+**Trying a code change without rebuilding:** both packages are pure Python. Copy `src/` to the robot and mount it with `--src`; the container then needs a `colcon build` first:
+
+```bash
+rsync -av --delete src/ agilex@192.168.1.102:~/bottle_picker/src/          # laptop
+./student-run.sh --name=bottle --src ~/bottle_picker/src bottle_picker:latest \
+  bash -c 'colcon build --merge-install --packages-select bottle_perception grasp_pipeline \
+           && source install/setup.bash && ros2 launch grasp_pipeline robot.launch.py'   # robot
+```
+
+Use the same `--src` and `bash -c 'colcon build ... && source install/setup.bash && pick-bottle'` for the pick container.
+
+**DDS:** the image sets `FASTDDS_BUILTIN_TRANSPORTS=UDPv4`. The `silvanus` container runs as root and this one as an unprivileged user, so they can't share Fast DDS's shared-memory files; with shared memory on, they never discover each other (tested with a root container on one host). Over UDP on the same host the detector kept up with a 5 Hz stream of 720p test images. If `ros2 node list` inside the container shows no `silvanus` nodes, check `echo $FASTDDS_BUILTIN_TRANSPORTS` first.
 
 ### Troubleshooting
 

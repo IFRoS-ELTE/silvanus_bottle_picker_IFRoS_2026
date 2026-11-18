@@ -18,7 +18,9 @@ Sequence:
   1. Open the gripper and move the arm to the pick view pose (camera looking at the ground
      just in front of the robot, the only area the arm can reach). With use_view_pose:=false
      the arm stays where it is: the camera must already see the bottle.
-  2. Locate the bottle from estimates made after the arm settled: its position is the median
+  2. Wait until the bottle has stayed in one place (within `stable_radius`) for at least
+     `stable_time` seconds, so a bottle that is still moving or being put down is not
+     grasped. Then locate it from those estimates: its position is the median
      of bottle_localizer's /bottles/positions (YOLO box + median depth, accurate even with a
      noisy depth camera); standing or lying, its direction and length come from
      grasp_inference's /grasp/bottle cylinder fit. Its radius is taken as `bottle_radius`.
@@ -168,6 +170,12 @@ class PickBottle(Node):
         self.declare_parameter('body_tilts', [0.0, 10.0, 20.0, 30.0, 40.0])
         self.declare_parameter('lying_tilts', [0.0, 25.0, -25.0])
         self.declare_parameter('bottle_samples', 5)          # bottle positions combined
+        # Grasps are only generated for a bottle that has stayed within stable_radius (m,
+        # horizontally) for at least stable_time (s, by the camera's stamps). Detections more
+        # than stable_max_gap (s) apart also restart the wait. stable_time 0 = no wait.
+        self.declare_parameter('stable_time', 3.0)
+        self.declare_parameter('stable_radius', 0.05)
+        self.declare_parameter('stable_max_gap', 1.0)
         # 'trajectory': FollowJointTrajectory (the sim's xArm gripper), 'gripper_command':
         # control_msgs/GripperCommand (the robot's AG-95)
         self.declare_parameter('gripper_interface', 'trajectory')
@@ -232,6 +240,9 @@ class PickBottle(Node):
         self.body_tilts = [math.radians(v) for v in p('body_tilts')]
         self.lying_tilts = [math.radians(v) for v in p('lying_tilts')]
         self.bottle_samples = int(p('bottle_samples'))
+        self.stable_time = float(p('stable_time'))
+        self.stable_radius = float(p('stable_radius'))
+        self.stable_max_gap = float(p('stable_max_gap'))
         self.gripper_interface = p('gripper_interface')
         if self.gripper_interface not in ('trajectory', 'gripper_command'):
             raise ValueError("gripper_interface must be 'trajectory' or 'gripper_command'")
@@ -392,25 +403,73 @@ class PickBottle(Node):
     def wait_for_bottle(self):
         """(bottle positions, cylinder estimates, Contact-GraspNet candidates or None).
 
-        All from data captured from now on: waits for `bottle_samples` positions (and, with
-        use_graspnet, candidates), then up to 3 s more for at least one cylinder estimate.
+        All from data captured from now on, and only once the bottle has stayed in one place:
+        waits until its positions have stayed within `stable_radius` of their median for at
+        least `stable_time` (and at least `bottle_samples` of them; with use_graspnet, also
+        candidates), then up to 3 s more for at least one cylinder estimate. A position
+        further away, or none for `stable_max_gap`, starts the wait again from that position.
+        Only the positions, estimates and candidates since the bottle stopped are returned.
         """
+        log = self.get_logger()
         with self.grasp_lock:
             self.grasp = None
             self.bottles = []
             self.positions = []
             self.accept_after = self.robot_now()
-        self.get_logger().info('Waiting for the bottle on /bottles/positions ...')
+        log.info('Waiting for the bottle on /bottles/positions ...')
+        arm = None
+        window, points = [], []  # positions since the bottle stopped, and their xy points
+        checked = 0              # self.positions[:checked] have been through the window
         deadline = None
         while rclpy.ok():
             with self.grasp_lock:
-                ready = (len(self.positions) >= self.bottle_samples
-                         and (self.grasp is not None or not self.use_graspnet))
-                if ready and deadline is None:
+                new = self.positions[checked:]
+                checked = len(self.positions)
+            for msg in new:
+                if arm is None:
+                    try:
+                        arm = self.lookup(self.frame, 'link_base', Time())[:3, 3]
+                    except tf2_ros.TransformException:
+                        continue
+                point = self.position_point(msg, arm)
+                if point is None:
+                    continue
+                stamp = Time.from_msg(msg.header.stamp)
+                if window:
+                    moved = np.linalg.norm(point[:2] - np.median(points, axis=0)[:2])
+                    gap = (stamp - Time.from_msg(window[-1].header.stamp)).nanoseconds / 1e9
+                    if moved > self.stable_radius:
+                        log.info(f'Bottle moved {moved * 100:.0f} cm: starting the wait again')
+                        window, points = [], []
+                    elif gap > self.stable_max_gap:
+                        log.info(f'Bottle not seen for {gap:.1f} s: starting the wait again')
+                        window, points = [], []
+                if not window:
+                    log.info(f'Bottle at x={point[0]:.3f} y={point[1]:.3f}: generating grasps '
+                             f'once it has stayed there for {self.stable_time:.1f} s')
+                window.append(msg)
+                points.append(point)
+            with self.grasp_lock:
+                ready = False
+                if window:
+                    since = Time.from_msg(window[0].header.stamp)
+                    still = (Time.from_msg(window[-1].header.stamp) - since).nanoseconds / 1e9
+                    # Candidates from before the bottle stopped are dropped: wait for new ones
+                    if self.grasp is not None and Time.from_msg(self.grasp.header.stamp) < since:
+                        self.grasp = None
+                    ready = (still >= self.stable_time
+                             and len(window) >= self.bottle_samples
+                             and (self.grasp is not None or not self.use_graspnet))
+                if not ready:
+                    deadline = None  # the bottle moved during the extra wait: start over
+                elif deadline is None:
+                    log.info(f'Bottle has stayed put for {still:.1f} s: generating grasps')
                     deadline = time.monotonic() + 3.0
-                if deadline is not None and (self.bottles or time.monotonic() > deadline):
-                    self.accept_after = None
-                    return list(self.positions), list(self.bottles), self.grasp
+                if deadline is not None:
+                    shapes = [m for m in self.bottles if Time.from_msg(m.header.stamp) >= since]
+                    if shapes or time.monotonic() > deadline:
+                        self.accept_after = None
+                        return list(window), shapes, self.grasp
             time.sleep(0.05)
         raise PickFailed('shutdown')
 
@@ -725,18 +784,22 @@ class PickBottle(Node):
                                              timeout=Duration(seconds=1.0))
         return transform_to_matrix(tf.transform)
 
+    def position_point(self, msg, arm):
+        """The bottle in a /bottles/positions message, in the planning frame, or None (TF).
+
+        The localizer gives one pose per detected bottle; the one nearest the arm is taken.
+        """
+        try:
+            T = self.lookup(self.frame, msg.header.frame_id, msg.header.stamp)
+        except tf2_ros.TransformException:
+            return None
+        found = [(T @ pose_to_matrix(pose))[:3, 3] for pose in msg.poses]
+        return min(found, key=lambda q: np.linalg.norm(q[:2] - arm[:2]))
+
     def locate_bottle(self, positions, markers):
         """One Bottle in the planning frame from localizer positions and cylinder estimates."""
         arm = self.lookup(self.frame, 'link_base', Time())[:3, 3]
-        points = []
-        for msg in positions:
-            try:
-                T = self.lookup(self.frame, msg.header.frame_id, msg.header.stamp)
-            except tf2_ros.TransformException:
-                continue
-            # The localizer gives one pose per detected bottle; take the one nearest the arm
-            found = [(T @ pose_to_matrix(pose))[:3, 3] for pose in msg.poses]
-            points.append(min(found, key=lambda q: np.linalg.norm(q[:2] - arm[:2])))
+        points = [q for q in (self.position_point(msg, arm) for msg in positions) if q is not None]
         if not points:
             raise PickFailed('no usable bottle position (TF failed)')
         position = np.median(points, axis=0)

@@ -31,7 +31,7 @@ try:
     from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithPose
     from cv_bridge import CvBridge
 
-    from ultralytics import YOLO
+    from ultralytics import YOLO, YOLOE
 except ImportError as err:
     # This needs a Python with both ROS and ultralytics: the venv from the README
     # (python3 -m venv --system-site-packages). Started under another one (e.g. conda's
@@ -50,7 +50,7 @@ class BottleDetector(Node):
         super().__init__('bottle_detector')
 
         # --- Parameters ---------------------------------------------------
-        self.declare_parameter('model', 'yolo11n.pt')
+        self.declare_parameter('model', 'yoloe-11l-seg.pt')
         self.declare_parameter('image_topic', '/camera/color/image_raw')
         self.declare_parameter('confidence', 0.25)
         self.declare_parameter('classes', ['bottle'])
@@ -65,19 +65,29 @@ class BottleDetector(Node):
         wanted = list(self.get_parameter('classes').value)
         self.device = self.get_parameter('device').value or None
 
-        # --- Upload YOLO --------------------------------------------------
-        # La primera vez descarga los pesos (~5 MB) a la carpeta desde la que lanzas.
-        self.get_logger().info(f'cargando YOLO: {model_path} ...')
-        self.model = YOLO(model_path)
-        # model.names diccionary {id: nombre}, p. ej. {39: 'bottle', ...}
-        self.class_ids = [i for i, name in self.model.names.items() if name in wanted]
-        if not self.class_ids:
-            self.get_logger().error(
-                f'ninguna de las clases {wanted} existe en el modelo. '
-                f'Clases disponibles: {list(self.model.names.values())}')
-            raise SystemExit(1)
-        self.get_logger().info(
-            f'buscando clases {wanted} (ids {self.class_ids}), confianza >= {self.confidence}')
+        # --- Upload YOLOE --------------------------------------------------
+        self.get_logger().info(f'cargando modelo: {model_path} ...')
+        if os.path.basename(model_path).startswith('yoloe'):
+            # YOLOE (open vocabulary): no fixed classes; it looks for the TEXTS in
+            # 'classes' (e.g. ['bottle']). set_classes turns them into text embeddings once,
+            # at start-up; from then on the model only knows those classes.
+            self.model = YOLOE(model_path)
+            self.model.set_classes(wanted, self.model.get_text_pe(wanted))
+            self.class_ids = None  # it only knows the wanted classes: nothing to filter
+            self.get_logger().info(
+                f'YOLOE buscando {wanted}, confianza >= {self.confidence}')
+        else:
+            # Closed-set YOLO (e.g. yolo11n.pt, COCO): keep only the wanted class ids
+            self.model = YOLO(model_path)
+            # model.names: dictionary {id: name}, e.g. {39: 'bottle', ...}
+            self.class_ids = [i for i, name in self.model.names.items() if name in wanted]
+            if not self.class_ids:
+                self.get_logger().error(
+                    f'ninguna de las clases {wanted} existe en el modelo. '
+                    f'Clases disponibles: {list(self.model.names.values())}')
+                raise SystemExit(1)
+            self.get_logger().info(
+                f'buscando clases {wanted} (ids {self.class_ids}), confianza >= {self.confidence}')
 
         # --- ROS: inputsvand outputs ---------------------------------------
         self.bridge = CvBridge()  # convierte sensor_msgs/Image <-> imagen de OpenCV

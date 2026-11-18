@@ -13,8 +13,8 @@ def generate_launch_description():
     args = [
         DeclareLaunchArgument('use_sim_time', default_value='true',
                               description='true en Gazebo, false en el robot real'),
-        DeclareLaunchArgument('model', default_value='yolo11n.pt',
-                              description='Pesos de YOLO (se descargan solos la primera vez)'),
+                DeclareLaunchArgument('model', default_value='yoloe-11l-seg.pt',
+                              description='Pesos: yoloe-11l-seg.pt (YOLOE, por defecto) o yolo11n.pt (COCO)'),
         DeclareLaunchArgument('confidence', default_value='0.25',
                               description='Confianza minima (0-1) para aceptar una deteccion'),
         DeclareLaunchArgument('image_topic', default_value='/camera/color/image_raw'),

@@ -64,7 +64,8 @@ from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.exceptions import ParameterUninitializedException
 from rclpy.node import Node
 from rclpy.parameter import Parameter
-from rclpy.qos import DurabilityPolicy, QoSProfile
+from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy,
+                       qos_profile_sensor_data)
 from rclpy.time import Time
 
 from control_msgs.action import FollowJointTrajectory, GripperCommand
@@ -75,7 +76,7 @@ from moveit_msgs.msg import (AttachedCollisionObject, CollisionObject, Constrain
                              JointConstraint, MoveItErrorCodes, OrientationConstraint,
                              PlanningScene, PositionConstraint)
 from moveit_msgs.srv import ApplyPlanningScene, GetCartesianPath, GetPositionIK
-from sensor_msgs.msg import JointState
+from sensor_msgs.msg import CameraInfo, Image, JointState
 from std_msgs.msg import String
 from shape_msgs.msg import SolidPrimitive
 from trajectory_msgs.msg import JointTrajectoryPoint
@@ -210,6 +211,25 @@ class PickBottle(Node):
         # shortest valid one is used)
         self.declare_parameter('planning_attempts', 30)
         self.declare_parameter('planning_time', 5.0)         # s per motion request
+        # Depth re-check at the pre-grasp: before going straight in, look along the approach with
+        # the wrist camera (no YOLO), compare the distance to the bottle's surface with the
+        # expected one and move the grasp that much further in or less far. Corrects the bottle
+        # position's error along the approach (translucent bottles, the localizer's radius
+        # offset). Only depth readings between recheck_min_depth (closer = the gripper's own
+        # fingers) and recheck_max_depth count; corrections over recheck_max_correction are
+        # ignored. The depth must be aligned with the color image (its camera_info is used).
+        self.declare_parameter('recheck_depth', False)
+        self.declare_parameter('recheck_depth_topic',
+                               '/camera/camera/aligned_depth_to_color/image_raw')
+        self.declare_parameter('recheck_info_topic',
+                               '/camera/camera/aligned_depth_to_color/camera_info')
+        self.declare_parameter('recheck_settle', 0.5)          # s still before the image
+        self.declare_parameter('recheck_timeout', 3.0)         # s to wait for a depth image
+        self.declare_parameter('recheck_window', 0.025)        # half-width around the point (m)
+        self.declare_parameter('recheck_min_depth', 0.18)      # m from the camera
+        self.declare_parameter('recheck_max_depth', 0.60)      # m from the camera
+        self.declare_parameter('recheck_max_correction', 0.06)  # m
+        self.declare_parameter('recheck_percentile', 10.0)     # nearest surface in the window
 
         p = lambda name: self.get_parameter(name).value  # noqa: E731
         self.frame = p('planning_frame')
@@ -267,6 +287,23 @@ class PickBottle(Node):
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self.planning_attempts = int(p('planning_attempts'))
         self.planning_time = float(p('planning_time'))
+        self.recheck = bool(p('recheck_depth'))
+        self.recheck_topic = p('recheck_depth_topic')
+        self.recheck_settle = float(p('recheck_settle'))
+        self.recheck_timeout = float(p('recheck_timeout'))
+        self.recheck_window = float(p('recheck_window'))
+        self.recheck_min = float(p('recheck_min_depth'))
+        self.recheck_max = float(p('recheck_max_depth'))
+        self.recheck_max_corr = float(p('recheck_max_correction'))
+        self.recheck_pct = float(p('recheck_percentile'))
+        self.recheck_K = None        # fx, fy, cx, cy of the aligned depth
+        self.recheck_image = None    # latest depth image while a re-check waits for one
+        self.recheck_after = None    # only depth images stamped after this count
+        if self.recheck:
+            # camera_info is small: keep it subscribed. The depth image is big, so it is only
+            # subscribed to during a re-check (it crosses the network to the laptop)
+            self.create_subscription(CameraInfo, p('recheck_info_topic'), self.on_recheck_info,
+                                     qos_profile_sensor_data)
 
         cb = ReentrantCallbackGroup()
         self.move_group = ActionClient(self, MoveGroup, '/move_action', callback_group=cb)
@@ -1073,6 +1110,8 @@ class PickBottle(Node):
 
         pre = tcp.copy()
         pre[:3, 3] -= back_off * approach
+        if self.recheck:
+            tcp = self.recheck_grasp(tcp, bottle, approach)
         try:
             self.move_linear(tcp, 'approach')
         except PickFailed:
@@ -1080,6 +1119,119 @@ class PickBottle(Node):
             self.move_linear(pre, 'retreat', avoid_collisions=False)
             raise
         return pre, approach
+
+    # ------------------------------------------------------- depth re-check
+    def on_recheck_info(self, msg):
+        self.recheck_K = (msg.k[0], msg.k[4], msg.k[2], msg.k[5])
+
+    def on_recheck_depth(self, msg):
+        if self.recheck_after is not None and Time.from_msg(msg.header.stamp) >= self.recheck_after:
+            self.recheck_image = msg
+
+    @staticmethod
+    def depth_to_metres(msg):
+        """sensor_msgs/Image depth -> float32 array in metres (16UC1 mm or 32FC1 m), or None."""
+        if msg.encoding in ('16UC1', 'mono16'):
+            d = np.frombuffer(msg.data, dtype=np.uint16).reshape(msg.height, msg.step // 2)
+            return d[:, :msg.width].astype(np.float32) / 1000.0
+        if msg.encoding == '32FC1':
+            d = np.frombuffer(msg.data, dtype=np.float32).reshape(msg.height, msg.step // 4)
+            return d[:, :msg.width].copy()
+        return None
+
+    def fresh_depth_image(self):
+        """One depth image taken after now (robot clock), or None after recheck_timeout."""
+        qos = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
+                         reliability=ReliabilityPolicy.RELIABLE)
+        self.recheck_image = None
+        self.recheck_after = self.robot_now()
+        sub = self.create_subscription(Image, self.recheck_topic, self.on_recheck_depth, qos)
+        try:
+            deadline = time.monotonic() + self.recheck_timeout
+            while rclpy.ok() and self.recheck_image is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            return self.recheck_image
+        finally:
+            self.recheck_after = None
+            self.destroy_subscription(sub)
+
+    def recheck_grasp(self, tcp, bottle, approach):
+        """At the pre-grasp: the grasp `tcp` moved along `approach` by the depth camera's error.
+
+        Projects the point of the bottle's surface where the fingers aim into the depth image,
+        takes the nearest surface around it (recheck_percentile of the readings within
+        recheck_window) and compares its distance with the expected one. The camera looks along
+        the approach, so the difference is how much further in (or less far) to go. Returns
+        `tcp` unchanged when there is no usable reading or the correction is too large.
+        """
+        log = self.get_logger()
+        if self.recheck_K is None:
+            log.warn('Depth re-check skipped: no camera_info on the depth yet')
+            return tcp
+        self.sleep(self.recheck_settle)
+        msg = self.fresh_depth_image()
+        if msg is None:
+            log.warn(f'Depth re-check skipped: no depth image on {self.recheck_topic} '
+                     f'within {self.recheck_timeout:.1f} s')
+            return tcp
+        depth = self.depth_to_metres(msg)
+        if depth is None:
+            log.warn(f'Depth re-check skipped: unknown depth encoding {msg.encoding}')
+            return tcp
+        try:
+            cam = self.lookup(self.frame, msg.header.frame_id, msg.header.stamp)
+        except tf2_ros.TransformException:
+            try:
+                cam = self.lookup(self.frame, msg.header.frame_id, Time())
+            except tf2_ros.TransformException as err:
+                log.warn(f'Depth re-check skipped: TF failed ({err})')
+                return tcp
+
+        # The surface point the fingers go for: in front of the grasp point by the radius plus
+        # the extra depth past the axis
+        surface = tcp[:3, 3] - (self.body_depth + bottle.radius) * approach
+        p = (np.linalg.inv(cam) @ np.append(surface, 1.0))[:3]   # in the camera optical frame
+        if p[2] < 0.05:
+            log.warn('Depth re-check skipped: the bottle is not in front of the camera')
+            return tcp
+        fx, fy, cx, cy = self.recheck_K
+        u, v = fx * p[0] / p[2] + cx, fy * p[1] / p[2] + cy
+        half = max(3, int(fx * self.recheck_window / p[2]))
+        h, w = depth.shape
+        u0, u1 = max(0, int(u) - half), min(w, int(u) + half + 1)
+        v0, v1 = max(0, int(v) - half), min(h, int(v) + half + 1)
+        if u0 >= u1 or v0 >= v1:
+            log.warn(f'Depth re-check skipped: the bottle point ({u:.0f}, {v:.0f}) px is '
+                     f'outside the {w}x{h} image')
+            return tcp
+        patch = depth[v0:v1, u0:u1]
+        valid = patch[np.isfinite(patch) & (patch > self.recheck_min) & (patch < self.recheck_max)]
+        if valid.size < 20:
+            log.warn(f'Depth re-check skipped: only {valid.size} valid depth readings around '
+                     f'({u:.0f}, {v:.0f}) px (expected the surface at {p[2]:.3f} m)')
+            return tcp
+        measured = float(np.percentile(valid, self.recheck_pct))
+        error = measured - float(p[2])   # > 0: the bottle is further along the approach
+        log.info(f'Depth re-check: surface expected at {p[2]:.3f} m, measured {measured:.3f} m '
+                 f'({valid.size} readings around ({u:.0f}, {v:.0f}) px): '
+                 f'{"further" if error > 0 else "closer"} by {abs(error) * 100:.1f} cm')
+        if abs(error) > self.recheck_max_corr:
+            log.warn(f'Depth re-check: {abs(error) * 100:.1f} cm is more than '
+                     f'{self.recheck_max_corr * 100:.0f} cm, not trusted; grasping as planned')
+            return tcp
+        corrected = tcp.copy()
+        corrected[:3, 3] += error * approach
+        # Never send the fingertips below the surface the bottle rests on
+        floor = bottle.support + 0.005
+        if corrected[2, 3] < floor:
+            if approach[2] < -1e-3:
+                error -= (floor - corrected[2, 3]) / -approach[2]
+                corrected = tcp.copy()
+                corrected[:3, 3] += error * approach
+            log.warn(f'Depth re-check: correction limited to {error * 100:+.1f} cm to stay '
+                     'above the surface')
+        log.info(f'Depth re-check: grasp moved {error * 100:+.1f} cm along the approach')
+        return corrected
 
     def grasp_and_lift(self, bottle, pre, approach):
         closed_at = self.move_gripper(self.grip_close, squeeze=True)

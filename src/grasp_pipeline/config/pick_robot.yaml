@@ -34,9 +34,15 @@ pick_bottle:
     body_tilts: [0.0]
     lying_tilts: [0.0]
     drop_joints_deg: [-185.0, -37.0, -53.0, 1.0, 85.0, 1.0]
-    home_joints_deg: [-6.0, -59.0, -25.0, 1.0, 28.0, -10.0]
+    home_joints_deg: [-6.3, -16.3, -24.5, 1.5, 27.8, -9.8]  # 24-11-2026, from /joint_states (rad -> deg)
     # Grasps only for a bottle that has stayed within stable_radius (m) for stable_time (s);
     # detections more than stable_max_gap (s) apart restart the wait. 0.0 s = no wait.
     stable_time: 3.0
     stable_radius: 0.05
     stable_max_gap: 1.0
+    # Depth re-check at the pre-grasp (see pick_node.py): set false to turn it off
+    recheck_depth: true
+    recheck_depth_topic: /camera/camera/aligned_depth_to_color/image_raw
+    recheck_info_topic: /camera/camera/aligned_depth_to_color/camera_info
+    recheck_min_depth: 0.18
+    recheck_max_correction: 0.06

@@ -1,0 +1,59 @@
+<?xml version="1.0"?>
+<!--
+  Botella de prueba (~0.5 L) hecha con cilindros.
+  Origen del modelo = centro de la BASE de la botella (asi z=0 la deja apoyada en el suelo).
+  Medidas: diametro 7 cm, altura total ~27.5 cm, masa 0.5 kg.
+  El AG-95 abre hasta ~95 mm (a confirmar con el laboratorio), asi que 70 mm cabe.
+-->
+<sdf version="1.9">
+  <model name="bottle">
+    <link name="body">
+      <inertial>
+        <pose>0 0 0.09 0 0 0</pose>
+        <mass>0.5</mass>
+        <inertia>
+          <ixx>0.0015</ixx><iyy>0.0015</iyy><izz>0.0003</izz>
+          <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz>
+        </inertia>
+      </inertial>
+
+      <!-- Colision: un solo cilindro del cuerpo + cuello (suficiente para agarrar) -->
+      <collision name="body_collision">
+        <pose>0 0 0.09 0 0 0</pose>
+        <geometry><cylinder><radius>0.035</radius><length>0.18</length></cylinder></geometry>
+        <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+      </collision>
+      <collision name="neck_collision">
+        <pose>0 0 0.225 0 0 0</pose>
+        <geometry><cylinder><radius>0.014</radius><length>0.09</length></cylinder></geometry>
+      </collision>
+
+      <!-- Visuales -->
+      <visual name="body_visual">
+        <pose>0 0 0.09 0 0 0</pose>
+        <geometry><cylinder><radius>0.035</radius><length>0.18</length></cylinder></geometry>
+        <material><ambient>0.1 0.5 0.2 1</ambient><diffuse>0.1 0.6 0.25 1</diffuse><specular>0.6 0.6 0.6 1</specular></material>
+      </visual>
+      <visual name="label_visual">
+        <pose>0 0 0.09 0 0 0</pose>
+        <geometry><cylinder><radius>0.0355</radius><length>0.07</length></cylinder></geometry>
+        <material><ambient>0.9 0.9 0.9 1</ambient><diffuse>0.95 0.95 0.95 1</diffuse></material>
+      </visual>
+      <visual name="shoulder_visual">
+        <pose>0 0 0.195 0 0 0</pose>
+        <geometry><cylinder><radius>0.025</radius><length>0.03</length></cylinder></geometry>
+        <material><ambient>0.1 0.5 0.2 1</ambient><diffuse>0.1 0.6 0.25 1</diffuse></material>
+      </visual>
+      <visual name="neck_visual">
+        <pose>0 0 0.235 0 0 0</pose>
+        <geometry><cylinder><radius>0.014</radius><length>0.05</length></cylinder></geometry>
+        <material><ambient>0.1 0.5 0.2 1</ambient><diffuse>0.1 0.6 0.25 1</diffuse></material>
+      </visual>
+      <visual name="cap_visual">
+        <pose>0 0 0.2675 0 0 0</pose>
+        <geometry><cylinder><radius>0.016</radius><length>0.015</length></cylinder></geometry>
+        <material><ambient>0.1 0.2 0.8 1</ambient><diffuse>0.1 0.2 0.9 1</diffuse></material>
+      </visual>
+    </link>
+  </model>
+</sdf>

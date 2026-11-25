@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# pick-bottle - pick_bottle on the real arm, with the robot parameters (pick_robot.yaml).
+# Asks for Enter first: the arm moves. Extra arguments go to --ros-args, e.g.
+#   pick-bottle -p velocity_scaling:=0.05
+set -e
+PARAMS="$(ros2 pkg prefix grasp_pipeline)/share/grasp_pipeline/config/pick_robot.yaml"
+read -rp 'pick_bottle MOVES THE REAL ARM. E-stop in reach, arm looking at the bottle? Enter to start, Ctrl-C to cancel. '
+exec ros2 run grasp_pipeline pick_bottle --ros-args --params-file "$PARAMS" "$@"

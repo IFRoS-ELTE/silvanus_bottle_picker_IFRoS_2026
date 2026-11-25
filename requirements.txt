@@ -1,0 +1,4 @@
+# Dependencias Python que NO vienen con ROS (se instalan con pip en el venv).
+# numpy<2: el cv_bridge de ROS 2 Jazzy esta compilado con numpy 1.x; numpy 2 lo rompe.
+numpy<2
+ultralytics

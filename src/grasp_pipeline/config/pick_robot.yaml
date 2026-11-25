@@ -1,0 +1,44 @@
+# pick_bottle on the real Silvanus: the robot's MoveIt and AG-95.
+#
+#   ros2 run grasp_pipeline pick_bottle --ros-args \
+#     --params-file $(ros2 pkg prefix grasp_pipeline)/share/grasp_pipeline/config/pick_robot.yaml
+#
+# Used by both the laptop demo (ROBOT=1 PICK=1 sim/grasp_demo.sh) and the robot's Docker
+# image (pick-bottle), so a change here reaches both after a rebuild.
+#
+# home_joints_deg = "near" camera pose (bottle under the wrist after the base arrives).
+# Far-workspace "survey" pose is NOT used here: run arm_pose pose:=survey (or nav_to_bottle)
+# before seeking distant bottles. See config/arm_poses_robot.yaml.
+#
+# The robot has no link_tcp: the fingertip point is 0.19 m along link_eef's z (the URDF's
+# grasp_link). The real AG-95 closes along link_eef's y (its URDF mount, AG95_MOUNT_RPY = 0, has
+# it along x, 90 deg off), so no yaw. Grasps: a standing bottle only horizontally from the front
+# (straight away from the arm's base, then up to 30 deg either side; never from the sides or
+# behind), a lying one only straight down. After the lift it carries the bottle to the drop pose
+# over the box on the robot's back (drop_joints_deg) and lets go, then returns to home (near).
+#
+# Every number in a list must be written as a float (0.0, not 0): the node wants double arrays.
+pick_bottle:
+  ros__parameters:
+    use_view_pose: false
+    tcp_link: link_eef
+    tcp_offset: [0.0, 0.0, 0.19, 0.0, 0.0, 0.0]
+    gripper_interface: gripper_command
+    gripper_action: /dh_ag95_gripper_controller/gripper_cmd
+    gripper_joint: left_outer_knuckle_joint
+    gripper_close: 0.93
+    slip_tolerance: 0.02
+    velocity_scaling: 0.1
+    ik_timeout: 0.2
+    check_all_candidates: true
+    body_yaws: [0.0, 15.0, -15.0, 30.0, -30.0]
+    body_tilts: [0.0]
+    lying_tilts: [0.0]
+    drop_joints_deg: [-185.0, -37.0, -53.0, 1.0, 85.0, 1.0]
+    # near pose (deg): look down so the wrist camera sees the bottle at grasp range
+    home_joints_deg: [-6.34, -16.30, -24.53, 1.46, 27.77, -9.76]
+    # Grasps only for a bottle that has stayed within stable_radius (m) for stable_time (s);
+    # detections more than stable_max_gap (s) apart restart the wait. 0.0 s = no wait.
+    stable_time: 3.0
+    stable_radius: 0.05
+    stable_max_gap: 1.0

@@ -4,3 +4,7 @@ log/
 **/__pycache__/
 **/*.py[cod]
 .git/
+docker/out/
+images/
+grasp_server/
+runs/

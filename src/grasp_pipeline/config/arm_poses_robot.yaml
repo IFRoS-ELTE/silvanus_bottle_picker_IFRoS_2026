@@ -1,0 +1,14 @@
+# Named xArm joint poses for the real Silvanus (joint1..joint6, degrees).
+# Used by: ros2 run grasp_pipeline arm_pose --ros-args -p pose:=survey|near
+#          and by nav_to_bottle (survey before seeking bottles, near after arrival).
+#
+# survey: camera sees the far workspace (for detection + nav_to_bottle).
+# near:   camera looks down at a bottle under the arm (for pick after the base arrives).
+#
+# Recorded from /joint_states on the robot (Nov 2026).
+# /** so the same file works for both arm_pose and nav_to_bottle node names.
+/**:
+  ros__parameters:
+    survey_joints_deg: [0.0, 0.0, -16.46, 0.0, -42.62, 0.0]
+    near_joints_deg: [-6.34, -16.30, -24.53, 1.46, 27.77, -9.76]
+    velocity_scaling: 0.1

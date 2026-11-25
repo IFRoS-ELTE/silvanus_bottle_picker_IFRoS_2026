@@ -33,7 +33,14 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SIM_WS="${SIM_WS:-$HOME/workspaces/scout_xarm_ros2}"
 CGN_DIR="${CGN_DIR:-$HOME/contact_graspnet_pytorch}"
 CGN_ENV="${CGN_ENV:-cgn_torch}"
-VENV="${VENV:-$HOME/silvanus_venv}"
+# Prefer the lab YOLO venv when present; else the README default name.
+if [ -z "${VENV:-}" ]; then
+    if [ -x "$HOME/venvs/yolo/bin/python3" ]; then
+        VENV="$HOME/venvs/yolo"
+    else
+        VENV="$HOME/silvanus_venv"
+    fi
+fi
 WORLD="${WORLD:-weston_robot_empty}"
 ROBOT="${ROBOT:-0}"
 ROBOT_IP="${ROBOT_IP:-192.168.1.102}"
@@ -51,6 +58,7 @@ if [ "${1:-}" = "stop" ]; then
     pkill -INT -f 'bottle_perception/bottle_localizer' || true
     pkill -INT -f 'rqt_image_view' || true
     pkill -INT -f 'grasp_pipeline/pick_bottle' || true
+    pkill -INT -f 'grasp_pipeline/nav_to_bottle' || true
     pkill -INT -f 'ros2 launch grasp_pipeline' || true
     pkill -INT -f 'python grasp_server.py' || true
     sleep 3
@@ -73,11 +81,16 @@ mkdir -p "$RC_DIR"
 
 # ROS environment shared by all ROS tabs. ~/.bashrc auto-activates conda base, whose
 # python3 would shadow the system/venv one, so it is deactivated first.
+# bottle_detector re-execs under $SILVANUS_VENV (defaults to ~/silvanus_venv). Point it at
+# the same tree as VENV so the detector tab does not die when that default path is missing.
 ROS_ENV="conda deactivate 2>/dev/null || true
+conda deactivate 2>/dev/null || true
 source /opt/ros/jazzy/setup.bash
 source '$SIM_WS/install/setup.bash'
 source '$REPO/install/setup.bash'
 export ROS_DOMAIN_ID=$DOMAIN
+export SILVANUS_VENV='$VENV'
+export PATH='$VENV/bin':\"\$PATH\"
 cd '$REPO'"
 if [ "$ROBOT" = 1 ]; then
     # Reach the robot's ROS graph over the network
@@ -124,8 +137,10 @@ if [ "$ROBOT" = 1 ]; then
     CAM=/camera/camera
     # Images cross Wi-Fi: subscribe reliably (best effort loses nearly every big frame), and
     # accept detections up to 5 s older than the depth (the camera and bottle are still)
+    # conf 0.45 cuts the ~0.25–0.40 ghost boxes that drove out-of-map nav goals in the bag
     tab detector "$ROS_ENV
-source '$VENV/bin/activate'" "ros2 launch bottle_perception detector.launch.py use_sim_time:=false image_topic:=$CAM/color/image_raw reliable:=true"
+source '$VENV/bin/activate'
+export SILVANUS_VENV='$VENV'" "ros2 launch bottle_perception detector.launch.py use_sim_time:=false image_topic:=$CAM/color/image_raw reliable:=true confidence:=0.45"
     tab localizer "$ROS_ENV" "ros2 run bottle_perception bottle_localizer --ros-args -p depth_topic:=$CAM/aligned_depth_to_color/image_raw -p depth_info_topic:=$CAM/aligned_depth_to_color/camera_info -p camera_info_topic:=$CAM/color/camera_info -p target_frame:=base_footprint -p reliable:=true"
     # The robot publishes no point cloud: grasp_inference builds it from the aligned depth
     tab grasp "$ROS_ENV" "ros2 run grasp_pipeline grasp_inference --ros-args -p use_graspnet:=false -p depth_topic:=$CAM/aligned_depth_to_color/image_raw -p reliable:=true -p detection_max_age:=5.0 -r /camera/color/camera_info:=$CAM/color/camera_info"

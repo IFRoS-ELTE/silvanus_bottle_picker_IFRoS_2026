@@ -30,6 +30,8 @@ setup(
         'console_scripts': [
             'grasp_inference = grasp_pipeline.grasp_inference_node:main',
             'pick_bottle = grasp_pipeline.pick_node:main',
+            'nav_to_bottle = grasp_pipeline.nav_to_bottle:main',
+            'arm_pose = grasp_pipeline.arm_pose:main',
         ],
     },
 )

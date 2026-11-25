@@ -36,13 +36,25 @@ except ImportError as err:
     # This needs a Python with both ROS and ultralytics: the venv from the README
     # (python3 -m venv --system-site-packages). Started under another one (e.g. conda's
     # (base), which can't load ROS, or the system one without ultralytics), restart under it.
-    venv = os.path.expanduser(os.environ.get('SILVANUS_VENV', '~/silvanus_venv'))
-    venv_python = os.path.join(venv, 'bin', 'python3')
-    if os.path.exists(venv_python) and os.path.realpath(sys.prefix) != os.path.realpath(venv):
+    # Prefer SILVANUS_VENV, then common lab paths (venvs/yolo), then README default.
+    candidates = []
+    if os.environ.get('SILVANUS_VENV'):
+        candidates.append(os.path.expanduser(os.environ['SILVANUS_VENV']))
+    candidates.extend([
+        os.path.expanduser('~/venvs/yolo'),
+        os.path.expanduser('~/silvanus_venv'),
+    ])
+    for venv in candidates:
+        venv_python = os.path.join(venv, 'bin', 'python3')
+        if not os.path.exists(venv_python):
+            continue
+        if os.path.realpath(sys.prefix) == os.path.realpath(venv):
+            break
         os.execv(venv_python, [venv_python] + sys.argv)
+    hint = candidates[0] if candidates else '~/venvs/yolo'
     sys.exit(f'bottle_detector: {err}. It needs ROS and ultralytics in the same Python: run '
-             f'"conda deactivate" and "source {venv}/bin/activate" (venv set up as in the '
-             'README), or set SILVANUS_VENV to your venv.')
+             f'"conda deactivate" and "source {hint}/bin/activate", or set SILVANUS_VENV '
+             f'to your venv (e.g. export SILVANUS_VENV=$HOME/venvs/yolo).')
 
 
 class BottleDetector(Node):

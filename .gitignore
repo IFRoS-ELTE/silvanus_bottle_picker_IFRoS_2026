@@ -9,3 +9,17 @@ runs/
 runs/
 docker/out/
 mobileclip_blt.ts
+*.pth
+*.onnx
+*.mcap
+*.bag
+*.db3
+runs/
+docker/out/
+mobileclip_blt.ts
+.mobileclip*
+*.part
+.vscode/
+*.mp4
+*.avi
+

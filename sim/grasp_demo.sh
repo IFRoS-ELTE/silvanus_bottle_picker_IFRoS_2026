@@ -20,7 +20,7 @@
 #   ROBOT=1 PICK=1 ./sim/grasp_demo.sh  # also a pick tab: pick_bottle on the real arm and
 #                                       # AG-95, started only after you press Enter in it
 #   ROBOT=1 PICK=server ./sim/grasp_demo.sh  # pick tab in action-server mode for the behaviour
-#                                       # tree (silvanus_bt): after ONE Enter it serves
+#                                       # tree (silvanus_bt): starts at once (no Enter), serves
 #                                       # /pick_bottle and only moves when the tree asks
 #   PICK=0 ./sim/grasp_demo.sh   # detection only: the three far bottles + observation pose,
 #                                # no moveit / pick tabs
@@ -140,10 +140,12 @@ if [ "$ROBOT" = 1 ]; then
     CAM=/camera/camera
     # Images cross Wi-Fi: subscribe reliably (best effort loses nearly every big frame), and
     # accept detections up to 5 s older than the depth (the camera and bottle are still)
-    # conf 0.45 cuts the ~0.25–0.40 ghost boxes that drove out-of-map nav goals in the bag
+    # Detector confidence: CONF=0.45 ./sim/grasp_demo.sh to change it (default 0.35).
+    # 0.45 cut the ~0.25-0.40 ghost boxes that once drove out-of-map nav goals, but it also
+    # missed real bottles; the behaviour tree additionally needs min_hits consistent sightings.
     tab detector "$ROS_ENV
 source '$VENV/bin/activate'
-export SILVANUS_VENV='$VENV'" "ros2 launch bottle_perception detector.launch.py use_sim_time:=false image_topic:=$CAM/color/image_raw reliable:=true confidence:=0.45"
+export SILVANUS_VENV='$VENV'" "ros2 launch bottle_perception detector.launch.py use_sim_time:=false image_topic:=$CAM/color/image_raw reliable:=true confidence:=${CONF:-0.35}"
     tab localizer "$ROS_ENV" "ros2 run bottle_perception bottle_localizer --ros-args -p depth_topic:=$CAM/aligned_depth_to_color/image_raw -p depth_info_topic:=$CAM/aligned_depth_to_color/camera_info -p camera_info_topic:=$CAM/color/camera_info -p target_frame:=base_footprint -p reliable:=true"
     # The robot publishes no point cloud: grasp_inference builds it from the aligned depth
     tab grasp "$ROS_ENV" "ros2 run grasp_pipeline grasp_inference --ros-args -p use_graspnet:=false -p depth_topic:=$CAM/aligned_depth_to_color/image_raw -p reliable:=true -p detection_max_age:=5.0 -r /camera/color/camera_info:=$CAM/color/camera_info"
@@ -156,7 +158,8 @@ export SILVANUS_VENV='$VENV'" "ros2 launch bottle_perception detector.launch.py 
         PICK_CMD="ros2 run grasp_pipeline pick_bottle --ros-args --params-file '$REPO/install/grasp_pipeline/share/grasp_pipeline/config/pick_robot.yaml'"
         if [ "$PICK" = server ]; then
             # Action-server mode: the behaviour tree sends one /pick_bottle goal per bottle
-            tab pick "$ROS_ENV" "read -rp 'pick_bottle server MOVES THE REAL ARM whenever the behaviour tree asks. E-stop in reach? Enter to start, Ctrl-C to cancel. ' && $PICK_CMD -p server:=true"
+            # Starts straight away (no Enter): the arm moves whenever the tree asks
+            tab pick "$ROS_ENV" "$PICK_CMD -p server:=true"
         else
             tab pick "$ROS_ENV" "read -rp 'pick_bottle MOVES THE REAL ARM. E-stop in reach, arm looking at the bottle? Enter to start, Ctrl-C to cancel. ' && $PICK_CMD"
         fi

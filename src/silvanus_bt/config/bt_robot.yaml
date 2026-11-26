@@ -9,7 +9,7 @@
 
     # Bottles
     detections_topic: /bottles/detections_3d
-    min_confidence: 0.45
+    min_confidence: 0.35         # also lower the detector: CONF=... in grasp_demo.sh
     min_hits: 3                 # consistent sightings before committing
     assoc_radius: 0.30
     forget_after: 3.0

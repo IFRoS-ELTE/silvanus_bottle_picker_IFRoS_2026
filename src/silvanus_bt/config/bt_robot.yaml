@@ -1,0 +1,49 @@
+# Behaviour tree parameters on the real robot.
+#   ros2 launch silvanus_bt bt_robot.launch.py
+# Any value can be overridden at launch:  ... pick_mode:=skip use_arm:=false
+/**:
+  ros__parameters:
+    tick_hz: 10.0
+    map_frame: map
+    robot_frame: base_footprint
+
+    # Bottles
+    detections_topic: /bottles/detections_3d
+    min_confidence: 0.45
+    min_hits: 3                 # consistent sightings before committing
+    assoc_radius: 0.30
+    forget_after: 3.0
+    selection: confidence       # confidence | nearest
+    max_bottle_distance: 2.5
+    blacklist_radius: 0.40
+    retry_after: 60.0
+
+    # Two-step approach
+    nav_action: navigate_to_pose
+    refine: true
+    approach_distance: 1.2      # step 1: stop at 1.2 m and measure again
+    standoff_distance: 0.55     # step 2: final stop, facing the bottle
+    already_there_extra: 0.10
+    check_map_bounds: true
+    map_margin: 0.15
+
+    # Exploration
+    use_explore: true
+    explore_resume_topic: /explore/resume
+
+    # Arm (same values as grasp_pipeline/config/arm_poses_robot.yaml)
+    use_arm: true
+    arm_group: xarm6
+    survey_joints_deg: [0.0, 0.0, -16.46, 0.0, -42.62, 0.0]
+    near_joints_deg: [-6.34, -16.30, -24.53, 1.46, 27.77, -9.76]
+    velocity_scaling: 0.1
+    planning_time: 5.0
+    planning_attempts: 5
+
+    # Pick
+    pick_mode: action           # action (automatic, /pick_bottle) | wait (manual) | skip
+    pick_action: /pick_bottle
+    pick_max_attempts: 0        # 0 = pick_bottle's server_max_attempts
+    pick_bottle_timeout: 0.0    # 0 = pick_bottle's server_bottle_timeout
+    pick_result_topic: /bt/pick_result
+    pick_timeout: 0.0

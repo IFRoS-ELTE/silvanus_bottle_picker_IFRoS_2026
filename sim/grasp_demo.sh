@@ -19,6 +19,9 @@
 #                                # (no sim/setup/moveit tabs: the robot runs its own MoveIt)
 #   ROBOT=1 PICK=1 ./sim/grasp_demo.sh  # also a pick tab: pick_bottle on the real arm and
 #                                       # AG-95, started only after you press Enter in it
+#   ROBOT=1 PICK=server ./sim/grasp_demo.sh  # pick tab in action-server mode for the behaviour
+#                                       # tree (silvanus_bt): after ONE Enter it serves
+#                                       # /pick_bottle and only moves when the tree asks
 #   PICK=0 ./sim/grasp_demo.sh   # detection only: the three far bottles + observation pose,
 #                                # no moveit / pick tabs
 #
@@ -145,16 +148,21 @@ export SILVANUS_VENV='$VENV'" "ros2 launch bottle_perception detector.launch.py 
     # The robot publishes no point cloud: grasp_inference builds it from the aligned depth
     tab grasp "$ROS_ENV" "ros2 run grasp_pipeline grasp_inference --ros-args -p use_graspnet:=false -p depth_topic:=$CAM/aligned_depth_to_color/image_raw -p reliable:=true -p detection_max_age:=5.0 -r /camera/color/camera_info:=$CAM/color/camera_info"
     tab image "$ROS_ENV" "ros2 run rqt_image_view rqt_image_view /bottles/image_annotated"
-    if [ "$PICK" = 1 ]; then
+    if [ "$PICK" = 1 ] || [ "$PICK" = server ]; then
         # pick_bottle on the robot's MoveIt and AG-95, with the robot parameters (home and drop
         # poses, gripper, grasp angles) from src/grasp_pipeline/config/pick_robot.yaml, the same
         # file the robot's Docker image uses. Edit it there, then colcon build.
         # Waits for Enter: the arm moves.
         PICK_CMD="ros2 run grasp_pipeline pick_bottle --ros-args --params-file '$REPO/install/grasp_pipeline/share/grasp_pipeline/config/pick_robot.yaml'"
-        tab pick "$ROS_ENV" "read -rp 'pick_bottle MOVES THE REAL ARM. E-stop in reach, arm looking at the bottle? Enter to start, Ctrl-C to cancel. ' && $PICK_CMD"
+        if [ "$PICK" = server ]; then
+            # Action-server mode: the behaviour tree sends one /pick_bottle goal per bottle
+            tab pick "$ROS_ENV" "read -rp 'pick_bottle server MOVES THE REAL ARM whenever the behaviour tree asks. E-stop in reach? Enter to start, Ctrl-C to cancel. ' && $PICK_CMD -p server:=true"
+        else
+            tab pick "$ROS_ENV" "read -rp 'pick_bottle MOVES THE REAL ARM. E-stop in reach, arm looking at the bottle? Enter to start, Ctrl-C to cancel. ' && $PICK_CMD"
+        fi
     fi
-    echo "Robot mode (ROS_DOMAIN_ID=$DOMAIN, robot $ROBOT_IP): detector, localizer, grasp, image$([ "$PICK" = 1 ] && echo ', pick')."
-    [ "$PICK" = 1 ] || echo "No pick tab: run with PICK=1 to grasp with the real arm."
+    echo "Robot mode (ROS_DOMAIN_ID=$DOMAIN, robot $ROBOT_IP): detector, localizer, grasp, image$([ "$PICK" != 0 ] && [ -n "$PICK" ] && echo ", pick ($PICK)")."
+    [ "$PICK" = 1 ] || [ "$PICK" = server ] || echo "No pick tab: run with PICK=1 to grasp with the real arm."
     exit 0
 fi
 

@@ -7,8 +7,10 @@ Combines three things to know WHERE each bottle is in the world:
   3. Camera lens parameters (fx, fy, cx, cy)  <- /camera/color/camera_info
 and then uses TF to transform the point from the camera frame to the world frame.
 
-    Outputs: /bottles/positions  geometry_msgs/PoseArray        (one pose per bottle)
-             /bottles/markers    visualization_msgs/MarkerArray (cylinders for RViz)
+    Outputs: /bottles/positions      geometry_msgs/PoseArray        (one pose per bottle)
+             /bottles/detections_3d  vision_msgs/Detection3DArray   (same positions + YOLO
+                                     confidence; used by the behaviour tree, silvanus_bt)
+             /bottles/markers        visualization_msgs/MarkerArray (cylinders for RViz)
 
 Depth does NOT have to be aligned with color. With the depth camera's own camera_info
 (/camera/depth/camera_info) every depth pixel is turned into a 3D point, moved into the
@@ -38,7 +40,7 @@ from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, Image
-from vision_msgs.msg import Detection2DArray
+from vision_msgs.msg import Detection2DArray, Detection3D, Detection3DArray, ObjectHypothesisWithPose
 from geometry_msgs.msg import Pose, PoseArray, PointStamped
 from visualization_msgs.msg import Marker, MarkerArray
 from cv_bridge import CvBridge
@@ -96,6 +98,7 @@ class BottleLocalizer(Node):
                                  self.on_detections, 10)
         self.pose_pub = self.create_publisher(PoseArray, '/bottles/positions', 10)
         self.marker_pub = self.create_publisher(MarkerArray, '/bottles/markers', 10)
+        self.det3d_pub = self.create_publisher(Detection3DArray, '/bottles/detections_3d', 10)
 
         self.get_logger().info(f'publishing positions in frame "{self.target_frame}"')
 
@@ -144,6 +147,8 @@ class BottleLocalizer(Node):
         poses = PoseArray()
         poses.header.frame_id = self.target_frame
         poses.header.stamp = msg.header.stamp
+        dets3d = Detection3DArray()
+        dets3d.header = poses.header
         markers = MarkerArray()
         clear = Marker()
         clear.action = Marker.DELETEALL      # delete cylinders from the previous cycle
@@ -206,6 +211,18 @@ class BottleLocalizer(Node):
             markers.markers.append(self.make_marker(i, world, msg))
 
             score = det.results[0].hypothesis.score if det.results else 0.0
+            d3 = Detection3D()
+            d3.header = poses.header
+            d3.bbox.center.position = world.point
+            d3.bbox.center.orientation.w = 1.0
+            d3.bbox.size.x = d3.bbox.size.y = 2 * self.radius
+            d3.bbox.size.z = 0.25
+            hyp = ObjectHypothesisWithPose()
+            hyp.hypothesis.class_id = det.results[0].hypothesis.class_id if det.results else 'bottle'
+            hyp.hypothesis.score = float(score)
+            hyp.pose.pose = pose
+            d3.results.append(hyp)
+            dets3d.detections.append(d3)
             self.get_logger().info(
                 f'bottle {i}: x={world.point.x:.2f} y={world.point.y:.2f} '
                 f'z={world.point.z:.2f} m in "{self.target_frame}" '
@@ -213,6 +230,7 @@ class BottleLocalizer(Node):
                 throttle_duration_sec=1.0)
 
         self.pose_pub.publish(poses)
+        self.det3d_pub.publish(dets3d)
         self.marker_pub.publish(markers)
 
     def depth_in_color(self, color_frame):

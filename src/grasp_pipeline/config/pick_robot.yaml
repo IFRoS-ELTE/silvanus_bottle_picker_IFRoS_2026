@@ -48,3 +48,7 @@ pick_bottle:
     recheck_info_topic: /camera/camera/aligned_depth_to_color/camera_info
     recheck_min_depth: 0.18
     recheck_max_correction: 0.06
+    # Action-server mode for the behaviour tree (silvanus_bt): run with -p server:=true
+    # (or ROBOT=1 PICK=server ./sim/grasp_demo.sh). Each /pick_bottle goal picks ONE bottle.
+    server_max_attempts: 3
+    server_bottle_timeout: 20.0

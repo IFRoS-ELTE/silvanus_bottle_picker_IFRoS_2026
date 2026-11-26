@@ -57,7 +57,7 @@ import time
 
 import numpy as np
 import rclpy
-from rclpy.action import ActionClient
+from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.duration import Duration
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
@@ -204,6 +204,13 @@ class PickBottle(Node):
         # With drop_joints_deg set: after dropping a bottle and going home, wait for the next
         # one and pick it too, until stopped (or max_attempts fail in a row on one bottle)
         self.declare_parameter('continuous', True)
+        # Action-server mode, for the behaviour tree (silvanus_bt): instead of picking on its
+        # own in a loop, serve /pick_bottle (silvanus_interfaces/action/PickBottle) and pick ONE
+        # bottle per goal (grasp, lift, drop, home). continuous is ignored.
+        self.declare_parameter('server', False)
+        self.declare_parameter('server_max_attempts', 3)    # attempts per goal (goal can override)
+        # s to wait for a stable bottle in one attempt, server mode only; 0 = forever
+        self.declare_parameter('server_bottle_timeout', 20.0)
         # Links allowed to touch the carried bottle: everything mounted below this one (the
         # gripper, and the camera next to it), from /robot_description
         self.declare_parameter('gripper_root_link', 'link_eef')
@@ -278,6 +285,12 @@ class PickBottle(Node):
         self.drop_joints = self.joints_param('drop_joints_deg')
         self.home_joints = self.joints_param('home_joints_deg')
         self.continuous = bool(p('continuous'))
+        self.server_mode = bool(p('server'))
+        self.server_attempts = max(1, int(p('server_max_attempts')))
+        self.server_bottle_timeout = float(p('server_bottle_timeout'))
+        self.bottle_timeout = 0.0   # active timeout of wait_for_bottle (set per goal)
+        self.cancel_requested = False
+        self.busy = False
         self.gripper_root = p('gripper_root_link')
         self.touch_links = []
         self.bottle_attached = False
@@ -346,7 +359,18 @@ class PickBottle(Node):
         self.accept_after = None  # only grasps from clouds newer than this are used
         self.grasp = None
 
-        threading.Thread(target=self.run, daemon=True).start()
+        if self.server_mode:
+            # Imported here so the normal mode does not need silvanus_interfaces
+            from silvanus_interfaces.action import PickBottle as PickBottleAction
+            self.PickAction = PickBottleAction
+            self.ready = threading.Event()
+            self.action_server = ActionServer(
+                self, PickBottleAction, '/pick_bottle',
+                execute_callback=self.execute_pick, goal_callback=self.on_pick_goal,
+                cancel_callback=self.on_pick_cancel, callback_group=ReentrantCallbackGroup())
+            threading.Thread(target=self.prepare_server, daemon=True).start()
+        else:
+            threading.Thread(target=self.run, daemon=True).start()
 
     # ---------------------------------------------------------------- inputs
     def joints_param(self, name):
@@ -454,11 +478,19 @@ class PickBottle(Node):
             self.positions = []
             self.accept_after = self.robot_now()
         log.info('Waiting for the bottle on /bottles/positions ...')
+        started = time.monotonic()
         arm = None
         window, points = [], []  # positions since the bottle stopped, and their xy points
         checked = 0              # self.positions[:checked] have been through the window
         deadline = None
         while rclpy.ok():
+            if self.cancel_requested or (
+                    self.bottle_timeout > 0 and deadline is None
+                    and time.monotonic() - started > self.bottle_timeout):
+                with self.grasp_lock:
+                    self.accept_after = None
+                raise PickFailed('canceled' if self.cancel_requested else
+                                 f'no stable bottle within {self.bottle_timeout:.0f} s')
             with self.grasp_lock:
                 new = self.positions[checked:]
                 checked = len(self.positions)
@@ -1294,10 +1326,13 @@ class PickBottle(Node):
             self.get_logger().error(f'Could not move back to the home pose: {err}')
 
     # ---------------------------------------------------------------- main
-    def pick_one(self):
+    def pick_one(self, max_attempts=None):
         """Wait for a bottle and grasp and lift it, up to max_attempts tries; True if lifted."""
         log = self.get_logger()
-        for attempt in range(1, self.max_attempts + 1):
+        max_attempts = max_attempts or self.max_attempts
+        for attempt in range(1, max_attempts + 1):
+            if self.cancel_requested:
+                break
             try:
                 self.wait_for_arm()
                 self.move_gripper(self.grip_open)
@@ -1308,7 +1343,7 @@ class PickBottle(Node):
                     self.move_to_joints(self.view_joints, 'pick view pose')
                     self.sleep(self.settle_time)
                 positions, shapes, grasps = self.wait_for_bottle()
-                log.info(f'Attempt {attempt}/{self.max_attempts}: reaching for the bottle')
+                log.info(f'Attempt {attempt}/{max_attempts}: reaching for the bottle')
                 bottle = self.locate_bottle(positions, shapes)
                 pre, approach = self.reach(bottle, grasps)
                 self.grasp_and_lift(bottle, pre, approach)
@@ -1328,29 +1363,33 @@ class PickBottle(Node):
                         self.move_gripper(self.grip_open)
                 except PickFailed:
                     pass
-        log.error(f'Giving up after {self.max_attempts} attempts.')
+        log.error(f'Giving up after {max_attempts} attempts.')
         self.go_home()
         return False
+
+    def prepare(self):
+        """Wait for MoveIt, the controllers and the services, then set up the planning scene."""
+        log = self.get_logger()
+        for client, name in [(self.move_group, '/move_action'),
+                                 (self.execute, '/execute_trajectory'),
+                                 (self.arm, 'arm controller'),
+                                 (self.gripper, 'gripper controller')]:
+            log.info(f'Waiting for {name} ...')
+            while rclpy.ok() and not client.wait_for_server(timeout_sec=2.0):
+                log.info(f'... still waiting for {name}', throttle_duration_sec=10.0)
+        for client in (self.cartesian, self.apply_scene, self.ik):
+            while rclpy.ok() and not client.wait_for_service(timeout_sec=2.0):
+                pass
+        self.clear_leftovers()
+        self.add_floor()
+        if not self.use_view_pose:
+            log.info('No view pose: grasping from where the arm is as soon as the bottle '
+                     'is seen')
 
     def run(self):
         log = self.get_logger()
         try:
-            for client, name in [(self.move_group, '/move_action'),
-                                 (self.execute, '/execute_trajectory'),
-                                 (self.arm, 'arm controller'),
-                                 (self.gripper, 'gripper controller')]:
-                log.info(f'Waiting for {name} ...')
-                while rclpy.ok() and not client.wait_for_server(timeout_sec=2.0):
-                    log.info(f'... still waiting for {name}', throttle_duration_sec=10.0)
-            for client in (self.cartesian, self.apply_scene, self.ik):
-                while rclpy.ok() and not client.wait_for_service(timeout_sec=2.0):
-                    pass
-            self.clear_leftovers()
-            self.add_floor()
-            if not self.use_view_pose:
-                log.info('No view pose: grasping from where the arm is as soon as the bottle '
-                         'is seen')
-
+            self.prepare()
             picked = 0
             while rclpy.ok():
                 if not self.pick_one():
@@ -1374,6 +1413,73 @@ class PickBottle(Node):
         except Exception as err:  # noqa: BLE001 - keep the node alive to report it
             if rclpy.ok():
                 log.error(f'Unexpected error: {err!r}')
+
+    # ------------------------------------------------------ action-server mode
+    def prepare_server(self):
+        try:
+            self.prepare()
+            self.ready.set()
+            self.get_logger().info('Ready: serving /pick_bottle (one bottle per goal)')
+        except Exception as err:  # noqa: BLE001
+            if rclpy.ok():
+                self.get_logger().error(f'Setup failed: {err!r}')
+
+    def on_pick_goal(self, _goal_request):
+        if self.busy:
+            self.get_logger().warn('Rejecting /pick_bottle goal: already picking')
+            return GoalResponse.REJECT
+        return GoalResponse.ACCEPT
+
+    def on_pick_cancel(self, _goal_handle):
+        self.get_logger().warn('/pick_bottle cancel requested: stopping after the current motion')
+        self.cancel_requested = True
+        return CancelResponse.ACCEPT
+
+    def execute_pick(self, goal_handle):
+        log = self.get_logger()
+        goal = goal_handle.request
+        result = self.PickAction.Result()
+        feedback = self.PickAction.Feedback()
+
+        def stage(text):
+            feedback.stage = text
+            goal_handle.publish_feedback(feedback)
+            log.info(f'[pick_bottle] {text}')
+
+        self.busy = True
+        self.cancel_requested = False
+        self.bottle_timeout = goal.bottle_timeout or self.server_bottle_timeout
+        ok = False
+        try:
+            if not self.ready.wait(timeout=60.0):
+                raise PickFailed('not ready: MoveIt / controllers not found')
+            stage('picking')
+            if self.pick_one(goal.max_attempts or self.server_attempts):
+                if self.drop_joints:
+                    stage('dropping')
+                    self.drop()
+                    self.go_home()
+                ok = True
+                result.message = 'bottle picked' + (' and dropped' if self.drop_joints else '')
+            else:
+                result.message = 'canceled' if self.cancel_requested else 'all attempts failed'
+        except PickFailed as err:
+            result.message = str(err)
+        except Exception as err:  # noqa: BLE001 - report it to the client
+            result.message = f'unexpected error: {err!r}'
+        finally:
+            self.bottle_timeout = 0.0
+            self.busy = False
+        result.success = ok
+        log.info(f'[pick_bottle] result: success={ok} ({result.message})')
+        if goal_handle.is_cancel_requested and not ok:
+            goal_handle.canceled()
+        elif ok:
+            goal_handle.succeed()
+        else:
+            goal_handle.abort()
+        self.cancel_requested = False
+        return result
 
 
 def main(args=None):

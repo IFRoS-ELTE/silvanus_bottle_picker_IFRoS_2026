@@ -1,0 +1,13 @@
+# Pick ONE bottle in front of the robot, drop it in the box and return the arm home.
+# Served by grasp_pipeline/pick_bottle with server:=true; called by the behaviour tree.
+#
+# Goal
+int32 max_attempts        # 0 = use the server's server_max_attempts
+float64 bottle_timeout    # s to wait for a stable bottle per attempt; 0 = server default
+---
+# Result
+bool success
+string message
+---
+# Feedback
+string stage              # picking | dropping
